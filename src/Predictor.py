@@ -35,9 +35,20 @@ class ProductClassifier(nn.Module):
 
 def load_category_mapping(mapping_file_path='category_mapping.json'):
     """Loads the category to index mapping from a JSON file."""
-    with open(mapping_file_path, 'r') as f:
-        category_mapping = json.load(f)
-    return category_mapping
+    try:
+        with open(mapping_file_path, 'r', encoding='utf-8') as f: # Specify encoding as utf-8
+            category_mapping = json.load(f)
+        return category_mapping
+    except FileNotFoundError:
+        messagebox.showerror("Error", f"Category mapping file not found at: {mapping_file_path}")
+        return None
+    except json.JSONDecodeError as e:
+        messagebox.showerror("Error", f"Error decoding JSON in {mapping_file_path}: {e}")
+        return None
+    except Exception as e:
+        messagebox.showerror("Error", f"Error loading category mapping: {e}")
+        return None
+
 
 def preprocess_image(image_path, transform=None):
     """Loads and preprocesses an image for prediction."""
@@ -154,6 +165,10 @@ def main():
 
     # Load category mapping
     category_mapping = load_category_mapping(args.mapping_path)
+
+    if category_mapping is None: # Exit if category mapping loading failed
+        return
+
     num_classes = len(category_mapping)
 
     # Load the trained model
