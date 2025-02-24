@@ -1,3 +1,4 @@
+import logging
 import random
 import time
 import os
@@ -6,14 +7,16 @@ import base64
 import requests
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue
+from queue import Queue, Empty
+
+from selenium.webdriver import ActionChains, Keys
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.chrome.service import Service
 from selenium import webdriver
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
 from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
 from typing import Dict, List
@@ -40,12 +43,11 @@ class WildberriesCrawler:
         options.add_argument("--disable-application-cache")
         options.add_argument("--incognito")
         options.add_argument("--headless")  # Включаем headless режим для повышения производительности
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        # Отключаем загрузку изображений
-        prefs = {"profile.managed_default_content_settings.images": 2}
-        options.add_experimental_option("prefs", prefs)
+        #options.add_argument("--no-sandbox")
+        #options.add_argument("--disable-dev-shm-usage")
+        #options.add_argument("--disable-gpu")
+        #prefs = {"profile.managed_default_content_settings.images": 2}
+        #options.add_experimental_option("prefs", prefs)
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
         logger.debug("Запущен новый драйвер Chrome в headless режиме.")
         return driver
@@ -102,7 +104,7 @@ class WildberriesCrawler:
 
     def download_image(self, url):
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=20)
             if response.status_code == 200:
                 logger.debug(f"Изображение успешно загружено: {url}")
                 return base64.b64encode(response.content).decode('utf-8')
@@ -117,53 +119,299 @@ class WildberriesCrawler:
         if match:
             return match.group(1)
         return None
+    def parse_wb_slider_images(self, driver, logger=None):
+        """
+        Парсит все изображения из слайдера Wildberries.
+
+        Args:
+            driver: экземпляр WebDriver
+            logger: опциональный logger для записи ошибок
+
+        Returns:
+            list: список URL изображений в высоком качестве
+        """
+        if logger is None:
+            logger = logging.getLogger(__name__)
+
+        image_urls = set()
+        max_attempts = 20
+        attempts = 0
+
+        while attempts < max_attempts:
+            try:
+                # Ждем загрузки слайдера
+                WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "ul.swiper-wrapper"))
+                )
+
+                # Получаем все слайды на текущей странице
+                slides = driver.find_elements(By.CSS_SELECTOR, "li.swiper-slide.j-product-photo")
+
+                images_before = len(image_urls)
+
+                # Обрабатываем каждый слайд
+                for slide in slides:
+                    try:
+                        # Проверяем, что слайд видим
+                        if not slide.is_displayed():
+                            continue
+
+                        # Находим изображение внутри слайда
+                        img = slide.find_element(By.CSS_SELECTOR, "div.slide__content img")
+                        src = img.get_attribute('data-src-pb')
+
+                        if src:
+                            if src.startswith('//'):
+                                src = 'https:' + src
+                            image_urls.add(src)
+
+                    except Exception as e:
+                        logger.debug(f"Ошибка при обработке слайда: {e}")
+                        continue
+
+                # Если не появилось новых изображений, пробуем пролистнуть
+                if len(image_urls) == images_before:
+                    try:
+                        next_button = WebDriverWait(driver, 2).until(
+                            EC.element_to_be_clickable((By.CSS_SELECTOR, "button.swiper-button-next"))
+                        )
+                        # Проверяем, активна ли кнопка
+                        if 'swiper-button-disabled' in next_button.get_attribute('class'):
+                            break
+
+                        driver.execute_script("arguments[0].click();", next_button)
+                        time.sleep(0.5)  # Ждем анимацию слайдера
+
+                        # Если после клика количество изображений не изменилось и прошло 2 попытки,
+                        # значит мы достигли конца слайдера
+                        if len(image_urls) == images_before and attempts > 1:
+                            break
+
+                    except TimeoutException:
+                        logger.debug("Кнопка Next не найдена или недоступна")
+                        break
+
+                attempts += 1
+
+            except Exception as e:
+                logger.error(f"Критическая ошибка при работе со слайдером: {e}")
+                break
+
+        return list(image_urls)
+
+    def parse_wb_slider_images_high_res_v2(self, driver, logger=None):
+        """
+        Парсит все изображения из слайдера Wildberries в высоком разрешении.
+        Сначала получает превью, затем кликает для получения высокого разрешения.
+
+        Args:
+            driver: экземпляр WebDriver
+            logger: опциональный logger для записи ошибок
+
+        Returns:
+            list: список URL изображений в высоком качестве
+        """
+        if logger is None:
+            logger = logging.getLogger(__name__)
+
+        image_urls = set()
+        max_attempts = 20
+        attempts = 0
+
+        try:
+            # Ждем загрузки основного слайдера
+            slider = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "ul.swiper-wrapper"))
+            )
+
+            while attempts < max_attempts:
+                # Получаем все видимые слайды на текущей странице
+                slides = driver.find_elements(By.CSS_SELECTOR,
+                                              "li.swiper-slide.j-product-photo:not([style*='display: none'])")
+
+                images_before = len(image_urls)
+
+                for slide in slides:
+                    try:
+                        driver.execute_script(
+                            "arguments[0].querySelector('.slide__content').click();",
+                            slide
+                        )
+
+                        # Ждем пока появится canvas zoom и получаем data URL
+                        try:
+                            zoom_canvas = WebDriverWait(driver, 10).until(  # Increased wait time
+                                EC.presence_of_element_located(
+                                    (By.CSS_SELECTOR, "canvas.photo-zoom__preview j-image-canvas"))
+                            )
+                        except TimeoutException:
+                            logger.debug("Canvas element не найден после клика.")
+                            ActionChains(driver).send_keys(
+                                Keys.ESCAPE).perform()  # Ensure zoom closes even if canvas not found
+                            continue  # Skip to next slide
+
+                        # Получаем data URL из canvas через JavaScript
+                        data_url = driver.execute_script(
+                            "return arguments[0].toDataURL('image/png');",
+                            zoom_canvas
+                        )
+
+                        if data_url and data_url.startswith('data:image/png;base64,'):
+                            image_urls.add(data_url)  # Store data URL instead of regular URL
+                            logger.debug(
+                                f"Добавлено изображение из canvas (data URL): {data_url[:50]}...")  # Log first 50 chars
+
+                        else:
+                            logger.warning("Не удалось получить data URL из canvas или неверный формат.")
+
+                        # Закрываем zoom view
+                        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                        time.sleep(0.2)
+
+
+                    except Exception as e:
+                        logger.debug(f"Ошибка при обработке слайда: {str(e)}")
+                        continue
+
+                # Если новых изображений нет, пробуем пролистнуть или завершаем
+                if len(image_urls) == images_before:
+                    try:
+                        next_button = WebDriverWait(driver, 2).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, "button.swiper-button-next"))
+                        )
+
+                        if 'swiper-button-disabled' in next_button.get_attribute('class'):
+                            logger.debug("Кнопка Next заблокирована, завершаем.")
+                            break
+
+                        driver.execute_script("arguments[0].click();", next_button)
+                        time.sleep(0.5)
+
+                        # Прерываем если 2 попытки не дали новых изображений после пролистывания
+                        if attempts > 1:
+                            logger.debug("Больше нет новых изображений после пролистывания, завершаем.")
+                            break
+
+                    except TimeoutException:
+                        logger.debug("Кнопка Next не найдена, возможно, все изображения показаны.")
+                        break
+
+                attempts += 1
+
+        except Exception as e:
+            logger.error(f"Критическая ошибка парсера: {str(e)}")
+
+        return list(image_urls)
 
     def process_product_page(self, driver, url, category):
         try:
             logger.info(f"Обработка карточки товара: {url}")
             driver.get(url)
-            time.sleep(random.uniform(1, 2))  # уменьшенная задержка
+            time.sleep(random.uniform(1, 4))
             self.handle_age_verification(driver)
 
-            wait = WebDriverWait(driver, 8)
-            wait.until(EC.presence_of_element_located((By.CLASS_NAME, "product-page__content")))
+            # Ждем загрузку основной информации о товаре
+            WebDriverWait(driver, 20).until(
+                EC.visibility_of_element_located((By.CLASS_NAME, "product-page__title"))
+            )
 
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            # Извлекаем базовую информацию: название, бренд, навигацию и начальные изображения
+            main_soup = BeautifulSoup(driver.page_source, 'html.parser')
 
-            name_element = soup.select_one("h1.product-page__title")
+            # Название товара
+            name_element = main_soup.select_one("h1.product-page__title")
             name = name_element.text.strip() if name_element else ""
 
-            description_element = soup.select_one("p.product-page__description")
-            description = description_element.text.strip() if description_element else ""
+            # Бренд товара
+            brand_element = main_soup.select_one("a.product-page__header-brand")
+            brand = brand_element.text.strip() if brand_element else ""
 
-            characteristics = {}
-            chars_container = soup.select("table.product-params__table tr")
-            for char in chars_container:
-                name_elem = char.select_one("th.product-params__cell")
-                value_elem = char.select_one("td.product-params__cell")
-                if name_elem and value_elem:
-                    characteristics[name_elem.text.strip()] = value_elem.text.strip()
+            # Хлебные крошки (навигация)
+            breadcrumbs = [crumb.text.strip() for crumb in
+                           main_soup.select("ul.breadcrumbs__list li.breadcrumbs__item span[itemprop='name']")]
 
+            # Первоначальное извлечение изображений (низкого качества, если есть)
             images = []
-            image_elements = soup.select("div.slide__content img.photo-zoom__preview")
-            for img in image_elements[:5]:
+            for img in main_soup.select("div.slide__content img.photo-zoom__preview"):
                 src = img.get('src')
                 if src:
                     if src.startswith('//'):
                         src = 'https:' + src
-                    img_data = self.download_image(src)
-                    if img_data:
-                        images.append(img_data)
+                    images.append(src)
+
+            try:
+                details_btn = WebDriverWait(driver, 20).until(
+                    EC.element_to_be_clickable((By.CSS_SELECTOR, "button.product-page__btn-detail"))
+                )
+                driver.execute_script("arguments[0].scrollIntoView(true);", details_btn)
+                time.sleep(0.5)
+
+                try:
+                    details_btn.click()
+                except Exception as e:
+                    driver.execute_script("arguments[0].click();", details_btn)
+
+                # Ждем загрузки попапа
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "table.product-params__table"))
+                )
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located(
+                        (By.CSS_SELECTOR, "section.product-details__description p.option__text"))
+                )
+
+                # Даем время на полную загрузку попапа
+                time.sleep(1)
+
+                # Парсим содержимое попапа
+                popup_soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+                # Характеристики товара
+                characteristics = {}
+                for row in popup_soup.select("table.product-params__table tr"):
+                    key_elem = row.select_one("th.product-params__cell")
+                    val_elem = row.select_one("td.product-params__cell")
+                    if key_elem and val_elem:
+                        characteristics[key_elem.text.strip()] = val_elem.text.strip()
+
+                # Описание товара - ищем по заголовку "Описание"
+                description = ""
+                description_section = popup_soup.find("section", class_="product-details__description")
+                if description_section:
+                    description_p = description_section.find("p", class_="option__text")
+                    if description_p:
+                        description = description_p.text.strip()
+                    else:
+                        logger.debug("Параграф с описанием не найден")
+                else:
+                    logger.debug("Секция с описанием не найдена")
+
+                # Закрываем попап
+                try:
+                    close_btn = WebDriverWait(driver, 5).until(
+                        EC.element_to_be_clickable((By.CSS_SELECTOR, "a.j-close.popup__close.close"))
+                    )
+                    close_btn.click()
+                except Exception as e:
+                    logger.debug(f"Не удалось закрыть попап: {e}")
+
+            except Exception as e:
+                logger.error(f"Ошибка при работе с попапом характеристик: {e}")
+
+            images = self.parse_wb_slider_images_high_res_v2(driver, logger)
 
             article = self.extract_article_from_url(url)
             logger.info(f"Успешно обработан товар: {article} - {name}")
+
             return {
                 "article": article,
                 "name": name,
+                "brand": brand,
+                "breadcrumbs": breadcrumbs,
                 "description": description,
                 "characteristics": characteristics,
                 "images": images,
-                "category": category,
+                "product-category-description": category,  # Изменено с "category" на "product-category-description"
                 "url": url
             }
         except Exception as e:
@@ -180,7 +428,7 @@ class WildberriesCrawler:
                     if product_data:
                         self.save_product(product_data)
                     self.products_queue.task_done()
-                except Queue.Empty:
+                except Empty:
                     break
                 except Exception as e:
                     logger.error(f"Ошибка в воркере: {e}")
@@ -277,8 +525,8 @@ class WildberriesCrawler:
 
 if __name__ == "__main__":
     category_targets_needed = {
-        "Презервативы": 4000 - 700,
-        "Вибраторы": 4000 - 650,
+        "Презервативы": 10, #4000 - 700,
+        "Вибраторы": 10, #4000 - 650,
         "Фаллоимитаторы": 4000 - 600,
         "Анальные пробки": 4000 - 590,
         "Мастурбаторы мужские": 4000 - 470,
