@@ -43,9 +43,9 @@ class WildberriesCrawler:
         options.add_argument("--disable-application-cache")
         options.add_argument("--incognito")
         options.add_argument("--headless")  # Включаем headless режим для повышения производительности
-        #options.add_argument("--no-sandbox")
-        #options.add_argument("--disable-dev-shm-usage")
-        #options.add_argument("--disable-gpu")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
         #prefs = {"profile.managed_default_content_settings.images": 2}
         #options.add_experimental_option("prefs", prefs)
         driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
