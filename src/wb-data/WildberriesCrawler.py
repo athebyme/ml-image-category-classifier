@@ -27,13 +27,38 @@ logger.remove()
 logger.add("crawler.log", format="{time} {level} {message}", level="INFO", rotation="5 MB")
 
 
+class ExponentialBackoff:
+    def __init__(self, initial_delay=5, max_delay=300, factor=2):
+        self.initial_delay = initial_delay
+        self.max_delay = max_delay
+        self.factor = factor
+        self.attempt = 0
+
+    def reset(self):
+        self.attempt = 0
+
+    def delay(self):
+        wait_time = min(self.initial_delay * (self.factor ** self.attempt), self.max_delay)
+        self.attempt += 1
+        jitter = random.uniform(0.8, 1.2)  # Add 20% jitter
+        return wait_time * jitter
+
+
+
 class WildberriesCrawler:
     def __init__(self, category_targets: Dict[str, int], max_workers: int = 8):
         self.category_targets = category_targets
         self.max_workers = max_workers
         self.output_dir = "./output"
         self.products_queue = Queue()
+        self.session_count = 0
+        self.max_requests_per_session = random.randint(15, 25)  # Randomize session length
+        self.backoff = ExponentialBackoff()
         os.makedirs(self.output_dir, exist_ok=True)
+
+        # Optional: Set up proxy list if available
+        self.proxies = []  # Add your proxies here if available
+
         logger.info("Инициализация WildberriesCrawler завершена.")
 
     def get_driver(self):
@@ -42,15 +67,62 @@ class WildberriesCrawler:
         options.add_argument(f"user-agent={ua.random}")
         options.add_argument("--disable-application-cache")
         options.add_argument("--incognito")
-        options.add_argument("--headless")  # Включаем headless режим для повышения производительности
+        options.add_argument("--headless")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
-        #prefs = {"profile.managed_default_content_settings.images": 2}
-        #options.add_experimental_option("prefs", prefs)
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-        logger.debug("Запущен новый драйвер Chrome в headless режиме.")
-        return driver
+
+        # Add this option to bypass some security restrictions
+        options.add_argument("--disable-web-security")
+
+        # Use proxy rotation if available
+        if hasattr(self, 'proxies') and self.proxies:
+            proxy = random.choice(self.proxies)
+            options.add_argument(f'--proxy-server={proxy}')
+            logger.debug(f"Используем прокси: {proxy}")
+
+        try:
+            # Use the ChromeDriverManager to handle driver installation
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            logger.debug("Запущен новый драйвер Chrome в headless режиме.")
+
+            # Skip localStorage and sessionStorage clearing in headless mode
+            # Just delete cookies which is more reliable
+            driver.delete_all_cookies()
+            logger.debug("Куки очищены успешно")
+
+            return driver
+        except Exception as e:
+            logger.error(f"Ошибка при инициализации ChromeDriver: {e}")
+
+            # Use a Windows-compatible path for the fallback method
+            try:
+                from selenium.webdriver.chrome.service import Service as ChromeService
+
+                # Try to find Chrome driver in the default Windows location
+                import os
+                driver_paths = [
+                    "chromedriver.exe",  # In current directory
+                    os.path.join(os.environ.get('LOCALAPPDATA', ''), "Selenium", "chromedriver.exe"),
+                    os.path.join(os.environ.get('PROGRAMFILES', ''), "Selenium", "chromedriver.exe"),
+                    os.path.join(os.environ.get('PROGRAMFILES(X86)', ''), "Selenium", "chromedriver.exe")
+                ]
+
+                for path in driver_paths:
+                    if os.path.exists(path):
+                        driver = webdriver.Chrome(service=ChromeService(path), options=options)
+                        logger.info(f"Подключение к Chrome драйверу по пути: {path}")
+                        driver.delete_all_cookies()
+                        return driver
+
+                # If no specific path found, try using the driver in PATH
+                driver = webdriver.Chrome(options=options)
+                driver.delete_all_cookies()
+                return driver
+
+            except Exception as e2:
+                logger.error(f"Альтернативная инициализация тоже не удалась: {e2}")
+                raise
 
     def handle_age_verification(self, driver):
         try:
@@ -87,20 +159,6 @@ class WildberriesCrawler:
                     last_height = new_height
                 current_position = new_height
         logger.info("Прокрутка страницы завершена.")
-
-    def wait_for_products_load(self, driver):
-        try:
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_all_elements_located((By.CLASS_NAME, "product-card__wrapper"))
-            )
-            logger.info("Карточки товаров успешно загружены.")
-            return True
-        except TimeoutException:
-            logger.error("Timeout: карточки товаров не загрузились.")
-            return False
-        except Exception as e:
-            logger.error(f"Ошибка при ожидании загрузки товаров: {e}")
-            return False
 
     def download_image(self, url):
         try:
@@ -202,14 +260,14 @@ class WildberriesCrawler:
     def parse_wb_slider_images_high_res_v2(self, driver, logger=None):
         """
         Парсит все изображения из слайдера Wildberries в высоком разрешении.
-        Сначала получает превью, затем кликает для получения высокого разрешения.
+        Сначала пытается получить обычные URL, затем использует canvas для получения data URL.
 
         Args:
             driver: экземпляр WebDriver
             logger: опциональный logger для записи ошибок
 
         Returns:
-            list: список URL изображений в высоком качестве
+            list: список URL изображений или data URLs
         """
         if logger is None:
             logger = logging.getLogger(__name__)
@@ -233,6 +291,22 @@ class WildberriesCrawler:
 
                 for slide in slides:
                     try:
+                        # Сначала проверим, есть ли обычное изображение в слайде
+                        try:
+                            img_element = slide.find_element(By.CSS_SELECTOR, "img")
+                            img_src = img_element.get_attribute("src")
+                            if img_src and not img_src.startswith("data:"):
+                                # Преобразуем URL в высокое разрешение
+                                high_res_url = img_src.replace("/tm/", "/big/")
+                                high_res_url = high_res_url.replace("/c246x328/", "/big/")
+                                image_urls.add(high_res_url)
+                                logger.debug(f"Добавлено обычное изображение: {high_res_url}")
+                                continue  # Переходим к следующему слайду, если получили обычный URL
+                        except Exception as img_e:
+                            logger.debug(f"Не удалось получить обычное изображение: {str(img_e)}")
+                            # Продолжаем к методу получения через canvas
+
+                        # Кликаем по слайду для увеличения
                         driver.execute_script(
                             "arguments[0].querySelector('.slide__content').click();",
                             slide
@@ -240,15 +314,14 @@ class WildberriesCrawler:
 
                         # Ждем пока появится canvas zoom и получаем data URL
                         try:
-                            zoom_canvas = WebDriverWait(driver, 10).until(  # Increased wait time
+                            zoom_canvas = WebDriverWait(driver, 5).until(
                                 EC.presence_of_element_located(
-                                    (By.CSS_SELECTOR, "canvas.photo-zoom__preview j-image-canvas"))
+                                    (By.CSS_SELECTOR, "canvas.photo-zoom__preview.j-image-canvas"))
                             )
                         except TimeoutException:
                             logger.debug("Canvas element не найден после клика.")
-                            ActionChains(driver).send_keys(
-                                Keys.ESCAPE).perform()  # Ensure zoom closes even if canvas not found
-                            continue  # Skip to next slide
+                            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                            continue  # Переходим к следующему слайду
 
                         # Получаем data URL из canvas через JavaScript
                         data_url = driver.execute_script(
@@ -257,20 +330,23 @@ class WildberriesCrawler:
                         )
 
                         if data_url and data_url.startswith('data:image/png;base64,'):
-                            image_urls.add(data_url)  # Store data URL instead of regular URL
-                            logger.debug(
-                                f"Добавлено изображение из canvas (data URL): {data_url[:50]}...")  # Log first 50 chars
-
+                            # Добавляем data URL в нашу коллекцию
+                            image_urls.add(data_url)
+                            logger.debug(f"Добавлено изображение из canvas (data URL): {data_url[:50]}...")
                         else:
                             logger.warning("Не удалось получить data URL из canvas или неверный формат.")
 
                         # Закрываем zoom view
                         ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-                        time.sleep(0.2)
-
+                        time.sleep(0.3)  # Увеличим паузу для более надежного закрытия зума
 
                     except Exception as e:
                         logger.debug(f"Ошибка при обработке слайда: {str(e)}")
+                        # Убедимся, что зум закрыт перед переходом к следующему слайду
+                        try:
+                            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
+                        except:
+                            pass
                         continue
 
                 # Если новых изображений нет, пробуем пролистнуть или завершаем
@@ -299,9 +375,40 @@ class WildberriesCrawler:
                 attempts += 1
 
         except Exception as e:
-            logger.error(f"Критическая ошибка парсера: {str(e)}")
+            logger.error(f"Критическая ошибка парсера изображений: {str(e)}")
 
         return list(image_urls)
+
+    # Add this method if you want to save data URLs as files
+    def save_data_url_to_file(self, data_url, product_id):
+        """
+        Сохраняет data URL как файл и возвращает путь к файлу
+        """
+        try:
+            import base64
+            import os
+            from datetime import datetime
+
+            # Create directory if it doesn't exist
+            img_dir = os.path.join("images", str(product_id))
+            os.makedirs(img_dir, exist_ok=True)
+
+            # Extract the base64 encoded data
+            header, encoded = data_url.split(",", 1)
+            data = base64.b64decode(encoded)
+
+            # Generate a unique filename
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+            file_path = os.path.join(img_dir, f"image_{timestamp}.png")
+
+            # Write to file
+            with open(file_path, "wb") as f:
+                f.write(data)
+
+            return file_path
+        except Exception as e:
+            logging.error(f"Ошибка при сохранении data URL: {str(e)}")
+            return None
 
     def process_product_page(self, driver, url, category):
         try:
@@ -310,10 +417,21 @@ class WildberriesCrawler:
             time.sleep(random.uniform(1, 4))
             self.handle_age_verification(driver)
 
+            # Initialize these variables early to avoid reference errors
+            # if the detail popup section fails
+            description = ""
+            characteristics = {}
+
             # Ждем загрузку основной информации о товаре
             WebDriverWait(driver, 20).until(
                 EC.visibility_of_element_located((By.CLASS_NAME, "product-page__title"))
             )
+            try:
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_all_elements_located((By.CSS_SELECTOR, "ul.breadcrumbs__list li.breadcrumbs__item"))
+                )
+            except TimeoutException:
+                logger.warning(f"Timeout waiting for breadcrumbs on {url}")
 
             # Извлекаем базовую информацию: название, бренд, навигацию и начальные изображения
             main_soup = BeautifulSoup(driver.page_source, 'html.parser')
@@ -327,8 +445,16 @@ class WildberriesCrawler:
             brand = brand_element.text.strip() if brand_element else ""
 
             # Хлебные крошки (навигация)
-            breadcrumbs = [crumb.text.strip() for crumb in
-                           main_soup.select("ul.breadcrumbs__list li.breadcrumbs__item span[itemprop='name']")]
+            breadcrumb_elements = main_soup.select("ul.breadcrumbs__list li.breadcrumbs__item span[itemprop='name']")
+
+            # If first attempt fails, try alternative selectors
+            if not breadcrumb_elements:
+                breadcrumb_elements = main_soup.select("ul.breadcrumbs__list li.breadcrumbs__item")
+                breadcrumbs = [crumb.text.strip() for crumb in breadcrumb_elements if crumb.text.strip()]
+                logger.info(f"Used alternative breadcrumb selector, found {len(breadcrumbs)} items")
+            else:
+                breadcrumbs = [crumb.text.strip() for crumb in breadcrumb_elements]
+                logger.info(f"Used original breadcrumb selector, found {len(breadcrumbs)} items")
 
             # Первоначальное извлечение изображений (низкого качества, если есть)
             images = []
@@ -424,65 +550,252 @@ class WildberriesCrawler:
             while True:
                 try:
                     url, category = self.products_queue.get_nowait()
-                    product_data = self.process_product_page(driver, url, category)
-                    if product_data:
-                        self.save_product(product_data)
-                    self.products_queue.task_done()
+                    try:
+                        product_data = self.process_product_page(driver, url, category)
+                        if product_data:
+                            self.save_product(product_data)
+                    except Exception as e:
+                        # Улучшенное логирование ошибок с трассировкой
+                        logger.error(f"Ошибка при обработке URL {url}: {e}")
+                        import traceback
+                        logger.error(traceback.format_exc())
+                    finally:
+                        self.products_queue.task_done()
                 except Empty:
                     break
                 except Exception as e:
-                    logger.error(f"Ошибка в воркере: {e}")
-                    self.products_queue.task_done()
+                    logger.error(f"Неожиданная ошибка в воркере: {e}")
+                    # Если задача не была взята, мы не должны отмечать ее выполненной
         finally:
             driver.quit()
             logger.debug("Драйвер закрыт.")
 
+    def process_product_data(self, product_data, images):
+        """
+        Обрабатывает данные продукта и изображения
+
+        Args:
+            product_data: словарь с данными продукта
+            images: список URL изображений или data URLs
+
+        Returns:
+            dict: обновленный словарь с данными продукта
+        """
+        # Добавляем изображения к данным продукта
+        product_data['images'] = []
+
+        for img in images:
+            if img.startswith('data:image/'):
+                # Option 1: Save data URL to file and add the file path
+                # file_path = self.save_data_url_to_file(img, product_data.get('article', 'unknown'))
+                # product_data['images'].append(file_path)
+
+                # Option 2: Just add the data URL directly (note: this can make the JSON very large)
+                product_data['images'].append(img)
+            else:
+                # For regular URLs, just add them directly
+                product_data['images'].append(img)
+
+        return product_data
+
+
+    def wait_for_products_load(self, driver):
+        try:
+            # First try the original selector
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_all_elements_located((By.CLASS_NAME, "product-card__wrapper"))
+                )
+                logger.info("Карточки товаров успешно загружены (основной селектор).")
+                return True
+            except TimeoutException:
+                logger.warning("Основной селектор не сработал, пробуем альтернативные...")
+
+                # Try alternative selectors
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-card"))
+                    )
+                    logger.info("Карточки товаров успешно загружены (альтернативный селектор 1).")
+                    return True
+                except TimeoutException:
+                    try:
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a.j-card-link"))
+                        )
+                        logger.info("Карточки товаров успешно загружены (альтернативный селектор 2).")
+                        return True
+                    except TimeoutException:
+                        logger.error("Не удалось найти товары на странице по всем селекторам.")
+
+                        # Take screenshot for debugging
+                        timestamp = int(time.time())
+                        screenshot_path = f"error_page_{timestamp}.png"
+                        driver.save_screenshot(screenshot_path)
+                        logger.info(f"Сохранен скриншот проблемной страницы: {screenshot_path}")
+
+                        # Get page source for debugging
+                        with open(f"error_page_{timestamp}.html", "w", encoding="utf-8") as f:
+                            f.write(driver.page_source)
+                        logger.info(f"Сохранен HTML проблемной страницы: error_page_{timestamp}.html")
+
+                        return False
+        except Exception as e:
+            logger.error(f"Непредвиденная ошибка при ожидании загрузки товаров: {e}")
+            return False
+
     def collect_product_urls(self, category: str, target_count: int) -> List[str]:
-        driver = self.get_driver()
         urls = []
         page = 1
+        max_retries = 3
+        retry_count = 0
+        max_consecutive_failures = 3
+        consecutive_failures = 0
 
-        try:
-            while len(urls) < target_count:
-                search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={category}&page={page}"
-                driver.get(search_url)
-                self.handle_age_verification(driver)
+        while len(urls) < target_count and consecutive_failures < max_consecutive_failures:
+            try:
+                # Create a new driver for each page or after several retries
+                # This helps avoid session detection/blocking
+                driver = self.get_driver()
 
-                if not self.wait_for_products_load(driver):
-                    logger.error(f"Не удалось загрузить товары на странице {page} для категории {category}.")
-                    break
+                try:
+                    search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={category}&page={page}"
+                    logger.info(f"Загрузка страницы {page} для категории '{category}'")
 
-                self.smooth_scroll(driver)
+                    driver.get(search_url)
+                    time.sleep(random.uniform(3, 7))  # More random human-like delay
 
-                soup = BeautifulSoup(driver.page_source, 'html.parser')
-                product_links = soup.select("a.product-card__link.j-card-link.j-open-full-product-card")
+                    self.handle_age_verification(driver)
 
-                if not product_links:
-                    logger.warning(f"Не найдены ссылки на товары на странице {page} для категории {category}.")
-                    break
+                    # Add randomized mouse movements to appear more human-like
+                    self.simulate_human_behavior(driver)
 
-                for link in product_links:
-                    href = link.get("href")
-                    if href:
-                        if not href.startswith('http'):
-                            href = 'https://www.wildberries.ru' + href
-                        urls.append(href)
-                        if len(urls) >= target_count:
+                    if not self.wait_for_products_load(driver):
+                        consecutive_failures += 1
+                        logger.warning(
+                            f"Не удалось загрузить товары на странице {page} (попытка {consecutive_failures}/{max_consecutive_failures})")
+                        if consecutive_failures >= max_consecutive_failures:
+                            logger.error(
+                                f"Достигнут лимит последовательных неудач. Возможно, бот обнаружен. Переключаемся на следующую категорию.")
                             break
+                        continue
 
-                logger.info(f"Страница {page}: собрано {len(urls)} ссылок для категории {category}.")
-                if len(urls) >= target_count:
-                    break
+                    # Reset consecutive failures counter on success
+                    consecutive_failures = 0
 
-                page += 1
-                time.sleep(random.uniform(1, 2))
-        except Exception as e:
-            logger.error(f"Ошибка при сборе ссылок для категории {category} на странице {page}: {e}")
-        finally:
-            driver.quit()
-            logger.debug("Драйвер закрыт после сбора ссылок.")
+                    # Smooth scroll with more human-like pauses
+                    self.smooth_scroll(driver, scroll_pause_time=random.uniform(0.7, 1.5),
+                                       scroll_increment=random.randint(40, 60))
+
+                    soup = BeautifulSoup(driver.page_source, 'html.parser')
+                    product_links = soup.select("a.product-card__link.j-card-link.j-open-full-product-card")
+
+                    if not product_links:
+                        logger.warning(f"Не найдены ссылки на товары на странице {page}. Пробуем другой селектор.")
+                        # Try alternative selectors
+                        product_links = soup.select("a.product-card__main.j-card-link")
+
+                        if not product_links:
+                            logger.warning(
+                                f"Альтернативный селектор тоже не нашел товары. Попробуем перезагрузить страницу.")
+                            retry_count += 1
+                            if retry_count >= max_retries:
+                                logger.error(f"Достигнут лимит попыток для страницы {page}. Переходим к следующей.")
+                                page += 1
+                                retry_count = 0
+                            continue
+
+                    retry_count = 0  # Reset retry count on success
+
+                    new_urls_count = 0
+                    for link in product_links:
+                        href = link.get("href")
+                        if href:
+                            if not href.startswith('http'):
+                                href = 'https://www.wildberries.ru' + href
+                            if href not in urls:  # Avoid duplicates
+                                urls.append(href)
+                                new_urls_count += 1
+                                if len(urls) >= target_count:
+                                    break
+
+                    logger.info(
+                        f"Страница {page}: добавлено {new_urls_count} новых ссылок (всего: {len(urls)}/{target_count})")
+
+                    # If we didn't get any new URLs, increment failures
+                    if new_urls_count == 0:
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            logger.warning(
+                                f"Слишком много страниц без новых товаров. Возможно, достигнут конец каталога.")
+                            break
+                    else:
+                        consecutive_failures = 0
+
+                    page += 1
+                    time.sleep(random.uniform(2, 5))  # Random delay between pages
+
+                finally:
+                    driver.quit()
+                    logger.debug("Драйвер закрыт после обработки страницы.")
+
+            except Exception as e:
+                logger.error(f"Ошибка при сборе ссылок на странице {page}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                consecutive_failures += 1
+                time.sleep(5)  # Wait after error
 
         return urls[:target_count]
+
+    def simulate_human_behavior(self, driver):
+        """Симулирует поведение человека для обхода обнаружения бота"""
+        try:
+            # Случайное движение мыши
+            viewport_width = driver.execute_script("return window.innerWidth")
+            viewport_height = driver.execute_script("return window.innerHeight")
+
+            # Перемещение к случайной точке на странице
+            action = ActionChains(driver)
+
+            # 2-3 случайных движения мыши
+            for _ in range(random.randint(2, 3)):
+                x = random.randint(10, viewport_width - 10)
+                y = random.randint(10, viewport_height - 10)
+                action.move_by_offset(x, y)
+                time.sleep(random.uniform(0.1, 0.3))
+
+            # Иногда кликаем на неинтерактивный элемент (например, пустое пространство)
+            if random.random() < 0.3:  # 30% chance
+                action.click()
+
+            action.perform()
+
+            # Иногда прокручиваем страницу немного вниз и обратно
+            if random.random() < 0.4:  # 40% chance
+                scroll_amount = random.randint(100, 300)
+                driver.execute_script(f"window.scrollBy(0, {scroll_amount})")
+                time.sleep(random.uniform(0.5, 1.2))
+                driver.execute_script(f"window.scrollBy(0, {-scroll_amount})")
+
+        except Exception as e:
+            logger.debug(f"Ошибка при симуляции поведения человека: {e}")
+
+    def randomize_browser_fingerprint(self, options):
+        """Randomizes browser fingerprint settings to avoid detection"""
+        # Random screen dimensions
+        width = random.choice([1366, 1440, 1920, 2560])
+        height = random.choice([768, 900, 1080, 1440])
+        options.add_argument(f"--window-size={width},{height}")
+
+        # Random language
+        languages = ["en-US,en;q=0.9", "en-GB,en;q=0.9", "ru-RU,ru;q=0.9", "de-DE,de;q=0.9"]
+        options.add_argument(f"--lang={random.choice(languages)}")
+
+        # Change accept header
+        options.add_argument("--accept-lang=en-US,en;q=0.9,ru;q=0.8")
+
+        return options
 
     def save_product(self, product_data):
         if product_data and product_data.get('article'):
@@ -525,7 +838,7 @@ class WildberriesCrawler:
 
 if __name__ == "__main__":
     category_targets_needed = {
-        "Презервативы": 4000 - 700,
+        "Презервативы": 1, #4000 - 700,
         "Вибраторы": 4000 - 650,
         "Фаллоимитаторы": 4000 - 600,
         "Анальные пробки": 4000 - 590,
