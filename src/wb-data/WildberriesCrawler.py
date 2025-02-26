@@ -923,23 +923,53 @@ if __name__ == "__main__":
         "Эрекционные кольца": 4000 - 1,
         "Юбки эротик": 4000 - 1,
     }
-    # 1. Рассчитать текущую общую сумму
-    current_total_target = sum(category_targets_needed.values())
-    print(f"Текущая общая сумма: {current_total_target}")
+    output_dir = "./output"
+    existing_category_counts = {}
 
-    # 2. Определить коэффициент масштабирования
-    desired_total_target = 1000
-    scaling_factor = desired_total_target / current_total_target
+    # 1. Прочитать JSON файлы из ./output и подсчитать категории (как и раньше)
+    if os.path.exists(output_dir) and os.path.isdir(output_dir):
+        for filename in os.listdir(output_dir):
+            if filename.endswith(".json"):
+                filepath = os.path.join(output_dir, filename)
+                try:
+                    with open(filepath, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                        category = data.get("product-category-description")
+                        if category:
+                            existing_category_counts[category] = existing_category_counts.get(category, 0) + 1
+                except json.JSONDecodeError:
+                    print(f"Ошибка декодирования JSON в файле: {filename}")
+                except Exception as e:
+                    print(f"Ошибка при чтении файла {filename}: {e}")
+
+    print("Существующие товары по категориям:")
+    for category, count in existing_category_counts.items():
+        print(f'"{category}": {count},')
+
+    # 2. Вычислить ИСХОДНЫЕ целевые суммы (до вычитания собранных)
+    initial_targets = category_targets_needed.copy()  # Копия для сохранения исходных значений
+    # for category in initial_targets:
+    #     initial_targets[category] = 4000  # Предполагаем, что 4000 - это "базовое" значение для масштабирования
+
+    current_total_initial_target = sum(initial_targets.values())  # Суммируем ИСХОДНЫЕ значения
+    print(f"\nИсходная общая сумма (для масштабирования): {current_total_initial_target}")
+
+    # 3. Определить коэффициент масштабирования (используя ИСХОДНУЮ сумму)
+    desired_total_target = current_total_initial_target / 4
+    scaling_factor = desired_total_target / current_total_initial_target
     print(f"Коэффициент масштабирования: {scaling_factor}")
 
-    # 3. Умножить и округлить
+    # 4. Масштабировать ИСХОДНЫЕ целевые значения, а затем вычесть собранные
     category_targets_needed_scaled = {}
-    for category, target in category_targets_needed.items():
-        scaled_target = round(target * scaling_factor)
-        category_targets_needed_scaled[category] = scaled_target
+    for category, initial_target in initial_targets.items():  # Итерируем по ИСХОДНЫМ целям
+        scaled_initial_target = round(initial_target * scaling_factor)  # Масштабируем ИСХОДНОЕ значение
+        existing_count = existing_category_counts.get(category, 0)
+        adjusted_target = max(0,
+                              scaled_initial_target - existing_count)  # Вычитаем собранные из МАСШТАБИРОВАННОГО значения
+        category_targets_needed_scaled[category] = adjusted_target
 
-    # 4. Вывести новые значения и новую общую сумму
-    print("\nНовые целевые значения (пропорционально уменьшенные):")
+    # 5. Вывести итоговые значения
+    print("\nИтоговые целевые значения (после масштабирования и учета существующих):")
     for category, target in category_targets_needed_scaled.items():
         print(f'"{category}": {target},')
 
