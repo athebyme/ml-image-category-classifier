@@ -62,67 +62,76 @@ class WildberriesCrawler:
         logger.info("Инициализация WildberriesCrawler завершена.")
 
     def get_driver(self):
+        import os
+        import time
+        from selenium.webdriver.chrome.service import Service
+        from fake_useragent import UserAgent
+
         ua = UserAgent()
         options = webdriver.ChromeOptions()
+
+        # Add these options for stability on Debian server
         options.add_argument(f"user-agent={ua.random}")
+        options.add_argument("--headless=new")  # Modern headless mode
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")  # Overcome limited resource problems
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-infobars")
+        options.add_argument("--remote-debugging-port=9222")
+        options.add_argument("--disable-setuid-sandbox")
+        options.add_argument("--disable-software-rasterizer")
+
+        # Avoid memory leaks
+        options.add_argument("--single-process")
         options.add_argument("--disable-application-cache")
         options.add_argument("--incognito")
-        options.add_argument("--headless")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
 
-        # Add this option to bypass some security restrictions
-        options.add_argument("--disable-web-security")
+        # Helpful for debugging
+        options.add_argument("--log-level=0")
 
-        # Use proxy rotation if available
+        # Proxy handling
         if hasattr(self, 'proxies') and self.proxies:
             proxy = random.choice(self.proxies)
             options.add_argument(f'--proxy-server={proxy}')
             logger.debug(f"Используем прокси: {proxy}")
 
-        try:
-            # Use the ChromeDriverManager to handle driver installation
-            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-            logger.debug("Запущен новый драйвер Chrome в headless режиме.")
+        # Environment variables for ChromeDriver
+        os.environ['DISPLAY'] = ':99'  # For Xvfb if needed
 
-            # Skip localStorage and sessionStorage clearing in headless mode
-            # Just delete cookies which is more reliable
-            driver.delete_all_cookies()
-            logger.debug("Куки очищены успешно")
-
-            return driver
-        except Exception as e:
-            logger.error(f"Ошибка при инициализации ChromeDriver: {e}")
-
-            # Use a Windows-compatible path for the fallback method
+        retries = 3
+        for attempt in range(retries):
             try:
-                from selenium.webdriver.chrome.service import Service as ChromeService
+                # Use direct path to ChromeDriver
+                service = Service('/usr/local/bin/chromedriver')
+                driver = webdriver.Chrome(service=service, options=options)
 
-                # Try to find Chrome driver in the default Windows location
-                import os
-                driver_paths = [
-                    "chromedriver.exe",  # In current directory
-                    os.path.join(os.environ.get('LOCALAPPDATA', ''), "Selenium", "chromedriver.exe"),
-                    os.path.join(os.environ.get('PROGRAMFILES', ''), "Selenium", "chromedriver.exe"),
-                    os.path.join(os.environ.get('PROGRAMFILES(X86)', ''), "Selenium", "chromedriver.exe")
-                ]
-
-                for path in driver_paths:
-                    if os.path.exists(path):
-                        driver = webdriver.Chrome(service=ChromeService(path), options=options)
-                        logger.info(f"Подключение к Chrome драйверу по пути: {path}")
-                        driver.delete_all_cookies()
-                        return driver
-
-                # If no specific path found, try using the driver in PATH
-                driver = webdriver.Chrome(options=options)
+                # Set page load timeout
+                driver.set_page_load_timeout(30)
                 driver.delete_all_cookies()
+
+                # Test if driver is working properly
+                driver.get("about:blank")
+
+                logger.debug("ChromeDriver запущен успешно.")
                 return driver
 
-            except Exception as e2:
-                logger.error(f"Альтернативная инициализация тоже не удалась: {e2}")
-                raise
+            except Exception as e:
+                logger.error(f"Попытка {attempt + 1}/{retries} не удалась: {e}")
+
+                # Clean up if driver was created
+                try:
+                    if 'driver' in locals():
+                        driver.quit()
+                except:
+                    pass
+
+                # Wait before retry
+                time.sleep(2)
+
+        # If all retries failed, raise the exception
+        logger.error("Не удалось инициализировать ChromeDriver после нескольких попыток")
+        raise Exception("Chrome initialization failed after multiple attempts")
 
     def handle_age_verification(self, driver):
         try:
