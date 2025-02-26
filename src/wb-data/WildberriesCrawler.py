@@ -23,6 +23,9 @@ from typing import Dict, List
 from loguru import logger
 
 # Настройка логирования: пишем в консоль и в файл
+
+os.environ['DISPLAY'] = ':99'
+
 logger.remove()
 logger.add("crawler.log", format="{time} {level} {message}", level="INFO", rotation="5 MB")
 
