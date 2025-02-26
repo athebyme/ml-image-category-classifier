@@ -1011,5 +1011,5 @@ if __name__ == "__main__":
     # Замените original словарь на scaled словарь в вашем коде
     category_targets_needed = category_targets_needed_scaled
 
-    crawler = WildberriesCrawler(category_targets_needed_scaled, max_workers=4)
+    crawler = WildberriesCrawler(category_targets_needed_scaled, max_workers=12)
     crawler.run()
