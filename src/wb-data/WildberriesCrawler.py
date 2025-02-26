@@ -55,6 +55,7 @@ class WildberriesCrawler:
         self.max_requests_per_session = random.randint(15, 25)  # Randomize session length
         self.backoff = ExponentialBackoff()
         os.makedirs(self.output_dir, exist_ok=True)
+        self.existing_articles = self.load_existing_articles()
 
         # Optional: Set up proxy list if available
         self.proxies = []  # Add your proxies here if available
@@ -585,6 +586,23 @@ class WildberriesCrawler:
 
         return product_data
 
+    def load_existing_articles(self):
+        """Загружает артикулы из уже собранных JSON файлов."""
+        existing_articles = set()
+        if os.path.exists(self.output_dir) and os.path.isdir(self.output_dir):
+            for filename in os.listdir(self.output_dir):
+                if filename.endswith(".json"):
+                    filepath = os.path.join(self.output_dir, filename)
+                    try:
+                        with open(filepath, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                            article = data.get("article")
+                            if article:
+                                existing_articles.add(article)
+                    except (json.JSONDecodeError, FileNotFoundError) as e:
+                        logger.warning(f"Ошибка при чтении файла {filename}: {e}")
+        logger.info(f"Загружено {len(existing_articles)} существующих артикулов.")
+        return existing_articles
 
     def wait_for_products_load(self, driver):
         try:
@@ -638,11 +656,11 @@ class WildberriesCrawler:
         retry_count = 0
         max_consecutive_failures = 3
         consecutive_failures = 0
+        collected_articles_for_category = set() # Для отслеживания артикулов, собранных в текущей категории
 
         while len(urls) < target_count and consecutive_failures < max_consecutive_failures:
             try:
                 # Create a new driver for each page or after several retries
-                # This helps avoid session detection/blocking
                 driver = self.get_driver()
 
                 try:
@@ -650,12 +668,11 @@ class WildberriesCrawler:
                     logger.info(f"Загрузка страницы {page} для категории '{category}'")
 
                     driver.get(search_url)
-                    time.sleep(random.uniform(3, 7))  # More random human-like delay
+                    time.sleep(random.uniform(3, 7))  # Random delay
 
                     self.handle_age_verification(driver)
-
-                    # Add randomized mouse movements to appear more human-like
                     self.simulate_human_behavior(driver)
+
 
                     if not self.wait_for_products_load(driver):
                         consecutive_failures += 1
@@ -667,10 +684,8 @@ class WildberriesCrawler:
                             break
                         continue
 
-                    # Reset consecutive failures counter on success
                     consecutive_failures = 0
 
-                    # Smooth scroll with more human-like pauses
                     self.smooth_scroll(driver, scroll_pause_time=random.uniform(0.7, 1.5),
                                        scroll_increment=random.randint(40, 60))
 
@@ -679,9 +694,7 @@ class WildberriesCrawler:
 
                     if not product_links:
                         logger.warning(f"Не найдены ссылки на товары на странице {page}. Пробуем другой селектор.")
-                        # Try alternative selectors
                         product_links = soup.select("a.product-card__main.j-card-link")
-
                         if not product_links:
                             logger.warning(
                                 f"Альтернативный селектор тоже не нашел товары. Попробуем перезагрузить страницу.")
@@ -692,7 +705,7 @@ class WildberriesCrawler:
                                 retry_count = 0
                             continue
 
-                    retry_count = 0  # Reset retry count on success
+                    retry_count = 0
 
                     new_urls_count = 0
                     for link in product_links:
@@ -700,16 +713,32 @@ class WildberriesCrawler:
                         if href:
                             if not href.startswith('http'):
                                 href = 'https://www.wildberries.ru' + href
-                            if href not in urls:  # Avoid duplicates
-                                urls.append(href)
-                                new_urls_count += 1
-                                if len(urls) >= target_count:
-                                    break
+
+                            # Извлекаем артикул из URL (пример: .../catalog/221596740/detail.aspx)
+                            article_match = re.search(r'/catalog/(\d+)/detail\.aspx', href)
+                            article = article_match.group(1) if article_match else None
+
+                            if article:
+                                if article not in self.existing_articles and article not in collected_articles_for_category: # Проверяем, что артикула нет в уже собранных и в текущей сессии
+                                    urls.append(href)
+                                    collected_articles_for_category.add(article) # Добавляем в собранные в текущей сессии
+                                    new_urls_count += 1
+                                    if len(urls) >= target_count:
+                                        break
+                                else:
+                                    logger.debug(f"Артикул {article} уже собран или в списке существующих. Пропускаем.")
+                            else:
+                                logger.warning(f"Не удалось извлечь артикул из URL: {href}. URL будет добавлен, но проверка на дубликат по артикулу невозможна.")
+                                if href not in urls: # Проверка на дубликат по URL на всякий случай
+                                    urls.append(href)
+                                    new_urls_count += 1
+                                    if len(urls) >= target_count:
+                                        break
+
 
                     logger.info(
                         f"Страница {page}: добавлено {new_urls_count} новых ссылок (всего: {len(urls)}/{target_count})")
 
-                    # If we didn't get any new URLs, increment failures
                     if new_urls_count == 0:
                         consecutive_failures += 1
                         if consecutive_failures >= max_consecutive_failures:
@@ -722,9 +751,11 @@ class WildberriesCrawler:
                     page += 1
                     time.sleep(random.uniform(2, 5))  # Random delay between pages
 
+
                 finally:
                     driver.quit()
                     logger.debug("Драйвер закрыт после обработки страницы.")
+
 
             except Exception as e:
                 logger.error(f"Ошибка при сборе ссылок на странице {page}: {e}")
@@ -732,6 +763,7 @@ class WildberriesCrawler:
                 logger.error(traceback.format_exc())
                 consecutive_failures += 1
                 time.sleep(5)  # Wait after error
+
 
         return urls[:target_count]
 
