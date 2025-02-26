@@ -63,54 +63,76 @@ class WildberriesCrawler:
         logger.info("Инициализация WildberriesCrawler завершена.")
 
     def get_driver(self):
+        import os
+        import time
+        from selenium.webdriver.chrome.service import Service
+        from fake_useragent import UserAgent
+
         ua = UserAgent()
         options = webdriver.ChromeOptions()
+
+        # Add these options for stability on Debian server
         options.add_argument(f"user-agent={ua.random}")
+        options.add_argument("--headless=new")  # Modern headless mode
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")  # Overcome limited resource problems
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-infobars")
+        options.add_argument("--remote-debugging-port=9222")
+        options.add_argument("--disable-setuid-sandbox")
+        options.add_argument("--disable-software-rasterizer")
+
+        # Avoid memory leaks
+        options.add_argument("--single-process")
         options.add_argument("--disable-application-cache")
         options.add_argument("--incognito")
-        options.add_argument("--headless=new")  # Updated headless flag for newer Chrome
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--disable-web-security")
 
-        # Add proxy if available
+        # Helpful for debugging
+        options.add_argument("--log-level=0")
+
+        # Proxy handling
         if hasattr(self, 'proxies') and self.proxies:
             proxy = random.choice(self.proxies)
             options.add_argument(f'--proxy-server={proxy}')
             logger.debug(f"Используем прокси: {proxy}")
 
-        try:
-            # Use system-installed ChromeDriver directly
-            driver = webdriver.Chrome(options=options)
-            logger.debug("Запущен новый драйвер Chrome в headless режиме.")
-            driver.delete_all_cookies()
-            logger.debug("Куки очищены успешно")
-            return driver
-        except Exception as e:
-            logger.error(f"Ошибка при инициализации ChromeDriver: {e}")
+        # Environment variables for ChromeDriver
+        os.environ['DISPLAY'] = ':99'  # For Xvfb if needed
 
-            # Fallback to using WebDriverManager
+        retries = 3
+        for attempt in range(retries):
             try:
-                service = Service(ChromeDriverManager().install())
+                # Use direct path to ChromeDriver
+                service = Service('/usr/local/bin/chromedriver')
                 driver = webdriver.Chrome(service=service, options=options)
-                driver.delete_all_cookies()
-                return driver
-            except Exception as e2:
-                logger.error(f"Альтернативная инициализация тоже не удалась: {e2}")
 
-                # Last resort - try finding chromedriver in specific locations
+                # Set page load timeout
+                driver.set_page_load_timeout(30)
+                driver.delete_all_cookies()
+
+                # Test if driver is working properly
+                driver.get("about:blank")
+
+                logger.debug("ChromeDriver запущен успешно.")
+                return driver
+
+            except Exception as e:
+                logger.error(f"Попытка {attempt + 1}/{retries} не удалась: {e}")
+
+                # Clean up if driver was created
                 try:
-                    import shutil
-                    chromedriver_path = shutil.which('chromedriver')
-                    if chromedriver_path:
-                        service = Service(chromedriver_path)
-                        driver = webdriver.Chrome(service=service, options=options)
-                        driver.delete_all_cookies()
-                        return driver
-                except Exception as e3:
-                    logger.error(f"Последняя попытка тоже не удалась: {e3}")
-                    raise
+                    if 'driver' in locals():
+                        driver.quit()
+                except:
+                    pass
+
+                # Wait before retry
+                time.sleep(2)
+
+        # If all retries failed, raise the exception
+        logger.error("Не удалось инициализировать ChromeDriver после нескольких попыток")
+        raise Exception("Chrome initialization failed after multiple attempts")
 
     def handle_age_verification(self, driver):
         try:
