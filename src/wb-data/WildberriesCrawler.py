@@ -847,7 +847,7 @@ class WildberriesCrawler:
 
 if __name__ == "__main__":
     category_targets_needed = {
-        "Презервативы": 1, #4000 - 700,
+        "Презервативы": 4000 - 700,
         "Вибраторы": 4000 - 650,
         "Фаллоимитаторы": 4000 - 600,
         "Анальные пробки": 4000 - 590,
@@ -923,5 +923,31 @@ if __name__ == "__main__":
         "Эрекционные кольца": 4000 - 1,
         "Юбки эротик": 4000 - 1,
     }
-    crawler = WildberriesCrawler(category_targets_needed, max_workers=8)
+    # 1. Рассчитать текущую общую сумму
+    current_total_target = sum(category_targets_needed.values())
+    print(f"Текущая общая сумма: {current_total_target}")
+
+    # 2. Определить коэффициент масштабирования
+    desired_total_target = 1000
+    scaling_factor = desired_total_target / current_total_target
+    print(f"Коэффициент масштабирования: {scaling_factor}")
+
+    # 3. Умножить и округлить
+    category_targets_needed_scaled = {}
+    for category, target in category_targets_needed.items():
+        scaled_target = round(target * scaling_factor)
+        category_targets_needed_scaled[category] = scaled_target
+
+    # 4. Вывести новые значения и новую общую сумму
+    print("\nНовые целевые значения (пропорционально уменьшенные):")
+    for category, target in category_targets_needed_scaled.items():
+        print(f'"{category}": {target},')
+
+    new_total_target = sum(category_targets_needed_scaled.values())
+    print(f"\nНовая общая сумма: {new_total_target}")
+
+    # Замените original словарь на scaled словарь в вашем коде
+    category_targets_needed = category_targets_needed_scaled
+
+    crawler = WildberriesCrawler(category_targets_needed_scaled, max_workers=4)
     crawler.run()
