@@ -656,16 +656,21 @@ class WildberriesCrawler:
         retry_count = 0
         max_consecutive_failures = 3
         consecutive_failures = 0
-        collected_articles_for_category = set() # Для отслеживания артикулов, собранных в текущей категории
+        collected_articles_for_category = set()  # Для отслеживания артикулов, собранных в текущей категории
 
-        while len(urls) < target_count and consecutive_failures < max_consecutive_failures:
+        # Список альтернативных поисковых запросов для текущей категории
+        alternative_search_terms = self.get_alternative_search_terms(category)
+        current_search_idx = 0
+        current_search_term = category
+
+        while len(urls) < target_count:
             try:
                 # Create a new driver for each page or after several retries
                 driver = self.get_driver()
 
                 try:
-                    search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={category}&page={page}"
-                    logger.info(f"Загрузка страницы {page} для категории '{category}'")
+                    search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={current_search_term}&page={page}"
+                    logger.info(f"Загрузка страницы {page} для поискового запроса '{current_search_term}'")
 
                     driver.get(search_url)
                     time.sleep(random.uniform(3, 7))  # Random delay
@@ -673,15 +678,23 @@ class WildberriesCrawler:
                     self.handle_age_verification(driver)
                     self.simulate_human_behavior(driver)
 
-
                     if not self.wait_for_products_load(driver):
                         consecutive_failures += 1
                         logger.warning(
                             f"Не удалось загрузить товары на странице {page} (попытка {consecutive_failures}/{max_consecutive_failures})")
                         if consecutive_failures >= max_consecutive_failures:
-                            logger.error(
-                                f"Достигнут лимит последовательных неудач. Возможно, бот обнаружен. Переключаемся на следующую категорию.")
-                            break
+                            # Пробуем сменить поисковый запрос вместо завершения
+                            if self.try_switch_to_next_search_term(alternative_search_terms, current_search_idx):
+                                current_search_idx += 1
+                                current_search_term = alternative_search_terms[current_search_idx]
+                                page = 1  # Сбрасываем на первую страницу
+                                consecutive_failures = 0
+                                logger.info(
+                                    f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                                continue
+                            else:
+                                logger.error(f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
+                                break
                         continue
 
                     consecutive_failures = 0
@@ -719,22 +732,22 @@ class WildberriesCrawler:
                             article = article_match.group(1) if article_match else None
 
                             if article:
-                                if article not in self.existing_articles and article not in collected_articles_for_category: # Проверяем, что артикула нет в уже собранных и в текущей сессии
+                                if article not in self.existing_articles and article not in collected_articles_for_category:
                                     urls.append(href)
-                                    collected_articles_for_category.add(article) # Добавляем в собранные в текущей сессии
+                                    collected_articles_for_category.add(article)
                                     new_urls_count += 1
                                     if len(urls) >= target_count:
                                         break
                                 else:
                                     logger.debug(f"Артикул {article} уже собран или в списке существующих. Пропускаем.")
                             else:
-                                logger.warning(f"Не удалось извлечь артикул из URL: {href}. URL будет добавлен, но проверка на дубликат по артикулу невозможна.")
-                                if href not in urls: # Проверка на дубликат по URL на всякий случай
+                                logger.warning(
+                                    f"Не удалось извлечь артикул из URL: {href}. URL будет добавлен, но проверка на дубликат по артикулу невозможна.")
+                                if href not in urls:
                                     urls.append(href)
                                     new_urls_count += 1
                                     if len(urls) >= target_count:
                                         break
-
 
                     logger.info(
                         f"Страница {page}: добавлено {new_urls_count} новых ссылок (всего: {len(urls)}/{target_count})")
@@ -742,20 +755,26 @@ class WildberriesCrawler:
                     if new_urls_count == 0:
                         consecutive_failures += 1
                         if consecutive_failures >= max_consecutive_failures:
-                            logger.warning(
-                                f"Слишком много страниц без новых товаров. Возможно, достигнут конец каталога.")
-                            break
+                            # Пробуем сменить поисковый запрос вместо завершения
+                            if current_search_idx < len(alternative_search_terms) - 1:
+                                current_search_idx += 1
+                                current_search_term = alternative_search_terms[current_search_idx]
+                                page = 1  # Сбрасываем на первую страницу
+                                consecutive_failures = 0
+                                logger.info(f"Страницы без новых товаров. Переключаемся на '{current_search_term}'")
+                            else:
+                                logger.warning(
+                                    f"Исчерпаны все альтернативные поисковые запросы. Завершаем с {len(urls)} товарами.")
+                                break
                     else:
                         consecutive_failures = 0
 
                     page += 1
                     time.sleep(random.uniform(2, 5))  # Random delay between pages
 
-
                 finally:
                     driver.quit()
                     logger.debug("Драйвер закрыт после обработки страницы.")
-
 
             except Exception as e:
                 logger.error(f"Ошибка при сборе ссылок на странице {page}: {e}")
@@ -764,8 +783,44 @@ class WildberriesCrawler:
                 consecutive_failures += 1
                 time.sleep(5)  # Wait after error
 
-
         return urls[:target_count]
+
+    def get_alternative_search_terms(self, category: str) -> List[str]:
+        """Генерирует альтернативные поисковые запросы на основе исходной категории"""
+        # Базовый список альтернатив для разных категорий
+        alternatives = {
+            "Пэстис эротик": ["Пэстисы", "Наклейки на грудь", "Украшения на грудь", "Ниппель тэйп", "Пестис"],
+            # Добавьте другие категории и их альтернативы по необходимости
+        }
+
+        # Если для категории есть предопределенные альтернативы, используем их
+        if category in alternatives:
+            return [category] + alternatives[category]
+
+        # Иначе генерируем стандартные вариации
+        # Например, убираем спецсимволы, меняем порядок слов и т.д.
+        words = category.split()
+
+        result = [category]  # Исходная категория всегда первая
+
+        # Добавляем вариации без специальных символов
+        clean_category = re.sub(r'[^\w\s]', '', category)
+        if clean_category != category:
+            result.append(clean_category)
+
+        # Если в категории несколько слов, меняем их порядок
+        if len(words) > 1:
+            for i in range(1, len(words)):
+                rotated = ' '.join(words[i:] + words[:i])
+                result.append(rotated)
+
+        # Дополнительные вариации можно добавить здесь
+
+        return result
+
+    def try_switch_to_next_search_term(self, alternative_terms: List[str], current_idx: int) -> bool:
+        """Проверяет, можно ли переключиться на следующий поисковый термин"""
+        return current_idx < len(alternative_terms) - 1
 
     def simulate_human_behavior(self, driver):
         """Симулирует поведение человека для обхода обнаружения бота"""
