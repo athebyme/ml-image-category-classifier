@@ -23,6 +23,9 @@ from typing import Dict, List
 from loguru import logger
 
 # Настройка логирования: пишем в консоль и в файл
+
+os.environ['DISPLAY'] = ':99'
+
 logger.remove()
 logger.add("crawler.log", format="{time} {level} {message}", level="INFO", rotation="5 MB")
 
@@ -63,66 +66,107 @@ class WildberriesCrawler:
         logger.info("Инициализация WildberriesCrawler завершена.")
 
     def get_driver(self):
-        ua = UserAgent()
+        from selenium.webdriver.chrome.service import Service
+        import random
+        import time
+
+        # Define Chrome options
         options = webdriver.ChromeOptions()
-        options.add_argument(f"user-agent={ua.random}")
-        options.add_argument("--disable-application-cache")
-        options.add_argument("--incognito")
-        options.add_argument("--headless=new")  # Updated headless flag for newer Chrome
+        options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
-        options.add_argument("--disable-web-security")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--window-size=1920,1080")
+
+        # Add user agent
+        from fake_useragent import UserAgent
+        ua = UserAgent()
+        user_agent = ua.random
+        options.add_argument(f"user-agent={user_agent}")
 
         # Add proxy if available
         if hasattr(self, 'proxies') and self.proxies:
             proxy = random.choice(self.proxies)
             options.add_argument(f'--proxy-server={proxy}')
-            logger.debug(f"Используем прокси: {proxy}")
 
+        # Set specific path to ChromeDriver
+        chromedriver_path = "/usr/local/bin/chromedriver"  # Adjust this to your actual path
+
+        # Try to create driver with explicit service
         try:
-            # Use system-installed ChromeDriver directly
-            driver = webdriver.Chrome(options=options)
-            logger.debug("Запущен новый драйвер Chrome в headless режиме.")
+            service = Service(executable_path=chromedriver_path)
+            driver = webdriver.Chrome(service=service, options=options)
+
+            # Set timeouts
+            driver.set_page_load_timeout(30)
+            driver.set_script_timeout(30)
+
+            # Clear cookies
             driver.delete_all_cookies()
-            logger.debug("Куки очищены успешно")
+
+            # Test if driver works
+            driver.get("about:blank")
+
             return driver
         except Exception as e:
-            logger.error(f"Ошибка при инициализации ChromeDriver: {e}")
-
-            # Fallback to using WebDriverManager
+            logger.error(f"Ошибка при создании драйвера: {e}")
+            # Wait and retry
+            time.sleep(3)
             try:
-                service = Service(ChromeDriverManager().install())
-                driver = webdriver.Chrome(service=service, options=options)
-                driver.delete_all_cookies()
+                # Try simpler initialization
+                driver = webdriver.Chrome(options=options)
                 return driver
             except Exception as e2:
-                logger.error(f"Альтернативная инициализация тоже не удалась: {e2}")
-
-                # Last resort - try finding chromedriver in specific locations
-                try:
-                    import shutil
-                    chromedriver_path = shutil.which('chromedriver')
-                    if chromedriver_path:
-                        service = Service(chromedriver_path)
-                        driver = webdriver.Chrome(service=service, options=options)
-                        driver.delete_all_cookies()
-                        return driver
-                except Exception as e3:
-                    logger.error(f"Последняя попытка тоже не удалась: {e3}")
-                    raise
+                logger.error(f"Повторная ошибка: {e2}")
+                raise
 
     def handle_age_verification(self, driver):
         try:
-            age_button = WebDriverWait(driver, 5).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "button.confirm-age"))
-            )
-            age_button.click()
-            time.sleep(0.5)  # уменьшенная задержка
-            logger.debug("Возрастное подтверждение пройдено.")
-        except TimeoutException:
-            logger.debug("Возрастное подтверждение не найдено, продолжаем.")
-            pass
+            # First check if age verification element exists using presence_of_element_located
+            try:
+                button_present = WebDriverWait(driver, 3).until(
+                    EC.presence_of_element_located((By.XPATH,
+                                                    "//button[contains(text(), 'Да, мне есть 18') or contains(text(), 'Да, мне исполнилось 18')]"))
+                )
+
+                if button_present:
+                    # Use JavaScript to click for better reliability
+                    try:
+                        driver.execute_script("arguments[0].click();", button_present)
+                        logger.info("Подтвердили возраст через JavaScript")
+                        time.sleep(1)  # Give time for the click to take effect
+                        return True
+                    except Exception as js_err:
+                        logger.warning(f"Ошибка при JavaScript клике на кнопку возраста: {js_err}")
+
+                        # Try regular click as fallback
+                        try:
+                            button_present.click()
+                            logger.info("Подтвердили возраст через обычный клик")
+                            time.sleep(1)
+                            return True
+                        except Exception as click_err:
+                            logger.warning(f"Ошибка при обычном клике на кнопку возраста: {click_err}")
+
+                            # Final attempt with Action Chains
+                            try:
+                                from selenium.webdriver.common.action_chains import ActionChains
+                                actions = ActionChains(driver)
+                                actions.move_to_element(button_present).click().perform()
+                                logger.info("Подтвердили возраст через ActionChains")
+                                time.sleep(1)
+                                return True
+                            except Exception as action_err:
+                                logger.warning(f"Ошибка при использовании ActionChains: {action_err}")
+                                return False
+            except:
+                # No age verification found or timeout
+                return False
+
+        except Exception as e:
+            logger.debug(f"Ошибка при попытке проверки на страницу возраста: {e}")
+            return False
 
     def smooth_scroll(self, driver, scroll_pause_time=0.5, scroll_increment=50, max_attempts_without_new=5):
         current_position = 0
@@ -658,123 +702,149 @@ class WildberriesCrawler:
         consecutive_failures = 0
         collected_articles_for_category = set()  # Для отслеживания артикулов, собранных в текущей категории
 
-        # Список альтернативных поисковых запросов для текущей категории
-        alternative_search_terms = self.get_alternative_search_terms(category)
-        current_search_idx = 0
-        current_search_term = category
+        # Keep track of driver sessions
+        driver = None
 
-        while len(urls) < target_count:
+        while len(urls) < target_count and consecutive_failures < max_consecutive_failures:
             try:
-                # Create a new driver for each page or after several retries
+                # Create a new driver for each page to avoid session issues
+                if driver:
+                    try:
+                        driver.quit()
+                    except:
+                        pass  # Ignore errors on quit
+
                 driver = self.get_driver()
 
-                try:
-                    search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={current_search_term}&page={page}"
-                    logger.info(f"Загрузка страницы {page} для поискового запроса '{current_search_term}'")
+                # Set script timeout to prevent hanging
+                driver.set_script_timeout(30)
+                driver.set_page_load_timeout(40)
 
+                search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={category}&page={page}"
+                logger.info(f"Загрузка страницы {page} для категории '{category}'")
+
+                # Load the page with error handling
+                try:
                     driver.get(search_url)
                     time.sleep(random.uniform(3, 7))  # Random delay
+                except Exception as page_load_err:
+                    logger.error(f"Ошибка загрузки страницы: {page_load_err}")
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        page += 1
+                        retry_count = 0
+                    continue
 
-                    self.handle_age_verification(driver)
+                # More robust age verification handling
+                try:
+                    result = self.handle_age_verification(driver)
+                    if result:
+                        # If age verification was shown, we should wait a moment
+                        time.sleep(2)
+                except Exception as age_err:
+                    logger.warning(f"Ошибка при проверке возраста: {age_err}")
+                    # Continue anyway, as the page might not have age verification
+
+                # Simulate human behavior with try/except
+                try:
                     self.simulate_human_behavior(driver)
+                except Exception as behavior_err:
+                    logger.warning(f"Ошибка при симуляции поведения: {behavior_err}")
 
-                    if not self.wait_for_products_load(driver):
-                        consecutive_failures += 1
-                        logger.warning(
-                            f"Не удалось загрузить товары на странице {page} (попытка {consecutive_failures}/{max_consecutive_failures})")
-                        if consecutive_failures >= max_consecutive_failures:
-                            # Пробуем сменить поисковый запрос вместо завершения
-                            if self.try_switch_to_next_search_term(alternative_search_terms, current_search_idx):
-                                current_search_idx += 1
-                                current_search_term = alternative_search_terms[current_search_idx]
-                                page = 1  # Сбрасываем на первую страницу
-                                consecutive_failures = 0
-                                logger.info(
-                                    f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
-                                continue
-                            else:
-                                logger.error(f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
-                                break
-                        continue
+                # Wait for products with explicit try/except
+                products_loaded = False
+                try:
+                    products_loaded = self.wait_for_products_load(driver)
+                except Exception as load_err:
+                    logger.error(f"Ошибка при ожидании загрузки товаров: {load_err}")
 
-                    consecutive_failures = 0
+                if not products_loaded:
+                    consecutive_failures += 1
+                    logger.warning(
+                        f"Не удалось загрузить товары на странице {page} (попытка {consecutive_failures}/{max_consecutive_failures})")
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.error(
+                            f"Достигнут лимит последовательных неудач. Возможно, бот обнаружен. Переключаемся на следующую категорию.")
+                        break
+                    continue
 
+                consecutive_failures = 0
+
+                # Smooth scroll with error handling
+                try:
                     self.smooth_scroll(driver, scroll_pause_time=random.uniform(0.7, 1.5),
                                        scroll_increment=random.randint(40, 60))
+                except Exception as scroll_err:
+                    logger.warning(f"Ошибка при прокрутке страницы: {scroll_err}")
 
-                    soup = BeautifulSoup(driver.page_source, 'html.parser')
-                    product_links = soup.select("a.product-card__link.j-card-link.j-open-full-product-card")
+                # Get page source safely
+                try:
+                    page_source = driver.page_source
+                    soup = BeautifulSoup(page_source, 'html.parser')
+                except Exception as source_err:
+                    logger.error(f"Ошибка при получении исходного кода страницы: {source_err}")
+                    retry_count += 1
+                    continue
 
-                    if not product_links:
-                        logger.warning(f"Не найдены ссылки на товары на странице {page}. Пробуем другой селектор.")
-                        product_links = soup.select("a.product-card__main.j-card-link")
-                        if not product_links:
-                            logger.warning(
-                                f"Альтернативный селектор тоже не нашел товары. Попробуем перезагрузить страницу.")
-                            retry_count += 1
-                            if retry_count >= max_retries:
-                                logger.error(f"Достигнут лимит попыток для страницы {page}. Переходим к следующей.")
-                                page += 1
-                                retry_count = 0
-                            continue
+                # Try both selectors without nested conditions
+                product_links = soup.select("a.product-card__link.j-card-link.j-open-full-product-card")
+                if not product_links:
+                    logger.warning(f"Не найдены ссылки на товары на странице {page}. Пробуем другой селектор.")
+                    product_links = soup.select("a.product-card__main.j-card-link")
 
-                    retry_count = 0
+                if not product_links:
+                    logger.warning(f"Альтернативный селектор тоже не нашел товары. Попробуем перезагрузить страницу.")
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        logger.error(f"Достигнут лимит попыток для страницы {page}. Переходим к следующей.")
+                        page += 1
+                        retry_count = 0
+                    continue
 
-                    new_urls_count = 0
-                    for link in product_links:
-                        href = link.get("href")
-                        if href:
-                            if not href.startswith('http'):
-                                href = 'https://www.wildberries.ru' + href
+                retry_count = 0
 
-                            # Извлекаем артикул из URL (пример: .../catalog/221596740/detail.aspx)
-                            article_match = re.search(r'/catalog/(\d+)/detail\.aspx', href)
-                            article = article_match.group(1) if article_match else None
+                new_urls_count = 0
+                for link in product_links:
+                    href = link.get("href")
+                    if href:
+                        if not href.startswith('http'):
+                            href = 'https://www.wildberries.ru' + href
 
-                            if article:
-                                if article not in self.existing_articles and article not in collected_articles_for_category:
-                                    urls.append(href)
-                                    collected_articles_for_category.add(article)
-                                    new_urls_count += 1
-                                    if len(urls) >= target_count:
-                                        break
-                                else:
-                                    logger.debug(f"Артикул {article} уже собран или в списке существующих. Пропускаем.")
+                        # Извлекаем артикул из URL (пример: .../catalog/221596740/detail.aspx)
+                        article_match = re.search(r'/catalog/(\d+)/detail\.aspx', href)
+                        article = article_match.group(1) if article_match else None
+
+                        if article:
+                            if article not in self.existing_articles and article not in collected_articles_for_category:
+                                urls.append(href)
+                                collected_articles_for_category.add(article)
+                                new_urls_count += 1
+                                if len(urls) >= target_count:
+                                    break
                             else:
-                                logger.warning(
-                                    f"Не удалось извлечь артикул из URL: {href}. URL будет добавлен, но проверка на дубликат по артикулу невозможна.")
-                                if href not in urls:
-                                    urls.append(href)
-                                    new_urls_count += 1
-                                    if len(urls) >= target_count:
-                                        break
+                                logger.debug(f"Артикул {article} уже собран или в списке существующих. Пропускаем.")
+                        else:
+                            logger.warning(f"Не удалось извлечь артикул из URL: {href}")
+                            if href not in urls:
+                                urls.append(href)
+                                new_urls_count += 1
+                                if len(urls) >= target_count:
+                                    break
 
-                    logger.info(
-                        f"Страница {page}: добавлено {new_urls_count} новых ссылок (всего: {len(urls)}/{target_count})")
+                logger.info(
+                    f"Страница {page}: добавлено {new_urls_count} новых ссылок (всего: {len(urls)}/{target_count})")
 
-                    if new_urls_count == 0:
-                        consecutive_failures += 1
-                        if consecutive_failures >= max_consecutive_failures:
-                            # Пробуем сменить поисковый запрос вместо завершения
-                            if current_search_idx < len(alternative_search_terms) - 1:
-                                current_search_idx += 1
-                                current_search_term = alternative_search_terms[current_search_idx]
-                                page = 1  # Сбрасываем на первую страницу
-                                consecutive_failures = 0
-                                logger.info(f"Страницы без новых товаров. Переключаемся на '{current_search_term}'")
-                            else:
-                                logger.warning(
-                                    f"Исчерпаны все альтернативные поисковые запросы. Завершаем с {len(urls)} товарами.")
-                                break
-                    else:
-                        consecutive_failures = 0
+                if new_urls_count == 0:
+                    consecutive_failures += 1
+                    if consecutive_failures >= max_consecutive_failures:
+                        logger.warning(
+                            f"Слишком много страниц без новых товаров. Возможно, достигнут конец каталога.")
+                        break
+                else:
+                    consecutive_failures = 0
 
-                    page += 1
-                    time.sleep(random.uniform(2, 5))  # Random delay between pages
-
-                finally:
-                    driver.quit()
-                    logger.debug("Драйвер закрыт после обработки страницы.")
+                page += 1
+                time.sleep(random.uniform(2, 5))  # Random delay between pages
 
             except Exception as e:
                 logger.error(f"Ошибка при сборе ссылок на странице {page}: {e}")
@@ -783,44 +853,25 @@ class WildberriesCrawler:
                 consecutive_failures += 1
                 time.sleep(5)  # Wait after error
 
+                # Force quit and recreate driver on general exception
+                try:
+                    if driver:
+                        driver.quit()
+                        driver = None
+                except:
+                    pass
+
+            finally:
+                # Always try to close the driver in finally block
+                try:
+                    if driver:
+                        driver.quit()
+                        driver = None
+                except Exception as quit_err:
+                    logger.warning(f"Не удалось закрыть драйвер: {quit_err}")
+                    driver = None
+
         return urls[:target_count]
-
-    def get_alternative_search_terms(self, category: str) -> List[str]:
-        """Генерирует альтернативные поисковые запросы на основе исходной категории"""
-        # Базовый список альтернатив для разных категорий
-        alternatives = {
-            "Пэстис эротик": ["Пэстисы", "Наклейки на грудь", "Украшения на грудь", "Ниппель тэйп", "Пестис"],
-            # Добавьте другие категории и их альтернативы по необходимости
-        }
-
-        # Если для категории есть предопределенные альтернативы, используем их
-        if category in alternatives:
-            return [category] + alternatives[category]
-
-        # Иначе генерируем стандартные вариации
-        # Например, убираем спецсимволы, меняем порядок слов и т.д.
-        words = category.split()
-
-        result = [category]  # Исходная категория всегда первая
-
-        # Добавляем вариации без специальных символов
-        clean_category = re.sub(r'[^\w\s]', '', category)
-        if clean_category != category:
-            result.append(clean_category)
-
-        # Если в категории несколько слов, меняем их порядок
-        if len(words) > 1:
-            for i in range(1, len(words)):
-                rotated = ' '.join(words[i:] + words[:i])
-                result.append(rotated)
-
-        # Дополнительные вариации можно добавить здесь
-
-        return result
-
-    def try_switch_to_next_search_term(self, alternative_terms: List[str], current_idx: int) -> bool:
-        """Проверяет, можно ли переключиться на следующий поисковый термин"""
-        return current_idx < len(alternative_terms) - 1
 
     def simulate_human_behavior(self, driver):
         """Симулирует поведение человека для обхода обнаружения бота"""
@@ -1044,5 +1095,5 @@ if __name__ == "__main__":
     # Замените original словарь на scaled словарь в вашем коде
     category_targets_needed = category_targets_needed_scaled
 
-    crawler = WildberriesCrawler(category_targets_needed_scaled, max_workers=4)
+    crawler = WildberriesCrawler(category_targets_needed_scaled, max_workers=12)
     crawler.run()
