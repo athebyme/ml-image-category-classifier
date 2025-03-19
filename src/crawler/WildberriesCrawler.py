@@ -19,10 +19,13 @@ from selenium.common.exceptions import TimeoutException, ElementClickIntercepted
 from bs4 import BeautifulSoup
 from typing import Dict, List
 from loguru import logger
+from pyvirtualdisplay import Display
 
 # Настройка логирования: пишем в консоль и в файл
 
-os.environ['DISPLAY'] = ':99'
+display = Display(visible=0, size=(1920, 1080))
+display.start()
+
 
 logger.remove()
 logger.add("crawler.log", format="{time} {level} {message}", level="INFO", rotation="5 MB")
