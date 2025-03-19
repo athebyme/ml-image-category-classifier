@@ -226,7 +226,7 @@ def main():
 
     writer = SummaryWriter('runs/product_classifier')
 
-    with open('category_mapping.json', 'w') as f:
+    with open('models/category_mapping.json', 'w') as f:
         json.dump(train_dataset.idx_to_category, f, indent=2)
 
     train_model(model, train_loader, val_loader, criterion, optimizer, scheduler, DEVICE, NUM_EPOCHS, writer)

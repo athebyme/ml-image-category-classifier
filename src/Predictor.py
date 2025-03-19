@@ -77,7 +77,7 @@ def predict_image(image, model, category_mapping, device):
     image_tensor = image_tensor.unsqueeze(0) # Add batch dimension
     image_tensor = image_tensor.to(device)
 
-    model.eval() # Set model to evaluation mode
+    model.eval() # Set models to evaluation mode
     with torch.no_grad():
         output = model(image_tensor)
         probabilities = torch.softmax(output, dim=1)
@@ -157,7 +157,7 @@ class ImageClassifierGUI:
 
 def main():
     parser = argparse.ArgumentParser(description='Predict product category from an image using GUI.')
-    parser.add_argument('--model_path', type=str, default='best_model.pth', help='Path to the trained model file')
+    parser.add_argument('--model_path', type=str, default='best_model.pth', help='Path to the trained models file')
     parser.add_argument('--mapping_path', type=str, default='category_mapping.json', help='Path to the category mapping file')
     args = parser.parse_args()
 
@@ -171,7 +171,7 @@ def main():
 
     num_classes = len(category_mapping)
 
-    # Load the trained model
+    # Load the trained models
     model = ProductClassifier(num_classes=num_classes).to(device)
     checkpoint = torch.load(args.model_path, map_location=device)
     model.load_state_dict(checkpoint['model_state_dict'])

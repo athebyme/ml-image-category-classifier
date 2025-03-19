@@ -162,7 +162,7 @@ cython_debug/
 /.github/
 /build/
 /dist/
-/src/model/
+/src/models/
 /src/runs/
 /src/cuda.py
 /ImageGUI.spec

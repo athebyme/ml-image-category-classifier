@@ -289,126 +289,238 @@ class WildberriesCrawler:
 
         return list(image_urls)
 
-    def parse_wb_slider_images_high_res_v2(self, driver, logger=None):
+    def parse_wb_slider_images_high_quality(self, driver, logger=None):
         """
-        Парсит все изображения из слайдера Wildberries в высоком разрешении.
-        Сначала пытается получить обычные URL, затем использует canvas для получения data URL.
+        Enhanced method to parse all high-quality images from Wildberries product page.
+        Uses multiple strategies to get the best possible images.
 
         Args:
-            driver: экземпляр WebDriver
-            logger: опциональный logger для записи ошибок
+            driver: WebDriver instance
+            logger: Optional logger for recording errors
 
         Returns:
-            list: список URL изображений или data URLs
+            list: List of high-quality image URLs
         """
         if logger is None:
             logger = logging.getLogger(__name__)
 
         image_urls = set()
-        max_attempts = 20
+        max_attempts = 15
         attempts = 0
 
         try:
-            # Ждем загрузки основного слайдера
-            slider = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "ul.swiper-wrapper"))
-            )
+            # First detect what type of image gallery we're dealing with
+            # Wildberries has multiple gallery layouts depending on the product
 
-            while attempts < max_attempts:
-                # Получаем все видимые слайды на текущей странице
-                slides = driver.find_elements(By.CSS_SELECTOR,
-                                              "li.swiper-slide.j-product-photo:not([style*='display: none'])")
+            # Wait for the gallery/slider to load
+            try:
+                WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((
+                        By.CSS_SELECTOR,
+                        "ul.swiper-wrapper, div.slider-block, div.sw-slider-product, div.zoom-image-container"
+                    ))
+                )
+                time.sleep(1)  # Additional wait to make sure images are fully loaded
+            except TimeoutException:
+                logger.warning("Не найдена галерея изображений на странице товара")
+                return []
 
-                images_before = len(image_urls)
+            # First try to find big images directly in the page source
+            # This is the most reliable and highest quality method
+            page_source = driver.page_source
 
+            # Pattern for high-quality image URLs in the page source
+            patterns = [
+                r'(https:\/\/images\.wbstatic\.net\/big\/new\/\d+\/\d+[-\w]+\.jpg)',
+                r'(https:\/\/images\.wbstatic\.net\/large\/new\/\d+\/\d+[-\w]+\.jpg)',
+                r'(https:\/\/images\.wbstatic\.net\/c516x688\/new\/\d+\/\d+[-\w]+\.jpg)',
+                r'(https:\/\/[\w-]+\.wbstatic\.net\/big\/new\/\d+\/\d+.*?\.jpg)'
+            ]
+
+            for pattern in patterns:
+                big_images = re.findall(pattern, page_source)
+                for img_url in big_images:
+                    # Ensure it's a full URL
+                    if img_url.startswith('//'):
+                        img_url = 'https:' + img_url
+                    image_urls.add(img_url)
+
+            # If we found images through regex, return those
+            if image_urls:
+                logger.info(f"Найдено {len(image_urls)} изображений высокого качества через анализ HTML")
+                return list(image_urls)
+
+            # If regex method failed, try extracting through DOM
+            logger.info("Попытка извлечения изображений через DOM элементы")
+
+            # Get all visible slides
+            current_strategy = "standard_gallery"
+            slides = driver.find_elements(By.CSS_SELECTOR,
+                                          "li.swiper-slide.j-product-photo:not([style*='display: none'])")
+
+            if not slides:
+                slides = driver.find_elements(By.CSS_SELECTOR, "div.sw-slider-product__item")
+                current_strategy = "new_gallery"
+
+            if not slides:
+                slides = driver.find_elements(By.CSS_SELECTOR, "div.slider-block__item")
+                current_strategy = "alternate_gallery"
+
+            if not slides:
+                # Last resort - look for any image that might be a product image
+                logger.warning("Не найдены слайды галереи, пробуем найти любые изображения товара")
+                current_strategy = "fallback"
+
+                # Try to find any product images
+                img_elements = driver.find_elements(By.CSS_SELECTOR, "img[src*='/catalog/']")
+
+                for img in img_elements:
+                    src = img.get_attribute("src")
+                    if src and not src.startswith("data:"):
+                        # Convert to high resolution URL
+                        high_res_url = src.replace("/tm/", "/big/").replace("/c246x328/", "/big/")
+                        image_urls.add(high_res_url)
+
+                # If we found any images this way, return them
+                if image_urls:
+                    return list(image_urls)
+
+            # Process slides based on the detected gallery type
+            logger.info(f"Используем стратегию извлечения изображений: {current_strategy}")
+
+            # Function to extract image URL and convert to high resolution
+            def extract_and_convert_image_url(element):
+                try:
+                    img_url = None
+
+                    # Check different attributes that might contain the URL
+                    for attr in ["src", "data-src", "data-bx-src", "data-original", "data-src-pb"]:
+                        img_url = element.get_attribute(attr)
+                        if img_url and not img_url.startswith("data:"):
+                            break
+
+                    if not img_url or img_url.startswith("data:"):
+                        return None
+
+                    # Normalize URL
+                    if img_url.startswith('//'):
+                        img_url = 'https:' + img_url
+
+                    # Convert to high resolution
+                    conversions = [
+                        ("/tm/", "/big/"),
+                        ("/c246x328/", "/big/"),
+                        ("/c252x336/", "/big/"),
+                        ("/c516x688/", "/big/"),
+                        ("/middle/", "/big/")
+                    ]
+
+                    for old, new in conversions:
+                        img_url = img_url.replace(old, new)
+
+                    return img_url
+                except Exception as e:
+                    logger.error(f"Ошибка при извлечении URL изображения: {e}")
+                    return None
+
+            # Process slides based on strategy
+            if current_strategy == "standard_gallery" or current_strategy == "new_gallery":
+                # For each slide in the gallery
                 for slide in slides:
                     try:
-                        # Сначала проверим, есть ли обычное изображение в слайде
+                        # Find the image element
+                        img_element = None
                         try:
                             img_element = slide.find_element(By.CSS_SELECTOR, "img")
-                            img_src = img_element.get_attribute("src")
-                            if img_src and not img_src.startswith("data:"):
-                                # Преобразуем URL в высокое разрешение
-                                high_res_url = img_src.replace("/tm/", "/big/")
-                                high_res_url = high_res_url.replace("/c246x328/", "/big/")
-                                image_urls.add(high_res_url)
-                                logger.debug(f"Добавлено обычное изображение: {high_res_url}")
-                                continue  # Переходим к следующему слайду, если получили обычный URL
-                        except Exception as img_e:
-                            logger.debug(f"Не удалось получить обычное изображение: {str(img_e)}")
-                            # Продолжаем к методу получения через canvas
-
-                        # Кликаем по слайду для увеличения
-                        driver.execute_script(
-                            "arguments[0].querySelector('.slide__content').click();",
-                            slide
-                        )
-
-                        # Ждем пока появится canvas zoom и получаем data URL
-                        try:
-                            zoom_canvas = WebDriverWait(driver, 5).until(
-                                EC.presence_of_element_located(
-                                    (By.CSS_SELECTOR, "canvas.photo-zoom__preview.j-image-canvas"))
-                            )
-                        except TimeoutException:
-                            logger.debug("Canvas element не найден после клика.")
-                            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-                            continue  # Переходим к следующему слайду
-
-                        # Получаем data URL из canvas через JavaScript
-                        data_url = driver.execute_script(
-                            "return arguments[0].toDataURL('image/png');",
-                            zoom_canvas
-                        )
-
-                        if data_url and data_url.startswith('data:image/png;base64,'):
-                            # Добавляем data URL в нашу коллекцию
-                            image_urls.add(data_url)
-                            logger.debug(f"Добавлено изображение из canvas (data URL): {data_url[:50]}...")
-                        else:
-                            logger.warning("Не удалось получить data URL из canvas или неверный формат.")
-
-                        # Закрываем zoom view
-                        ActionChains(driver).send_keys(Keys.ESCAPE).perform()
-                        time.sleep(0.3)  # Увеличим паузу для более надежного закрытия зума
-
-                    except Exception as e:
-                        logger.debug(f"Ошибка при обработке слайда: {str(e)}")
-                        # Убедимся, что зум закрыт перед переходом к следующему слайду
-                        try:
-                            ActionChains(driver).send_keys(Keys.ESCAPE).perform()
                         except:
-                            pass
+                            try:
+                                img_element = slide.find_element(By.CSS_SELECTOR, "div.slide__content img")
+                            except:
+                                try:
+                                    img_element = slide.find_element(By.CSS_SELECTOR, "div.sw-slider-product__img img")
+                                except:
+                                    logger.debug(f"Не найдено изображение в слайде")
+                                    continue
+
+                        if img_element:
+                            img_url = extract_and_convert_image_url(img_element)
+                            if img_url:
+                                image_urls.add(img_url)
+                    except Exception as e:
+                        logger.debug(f"Ошибка при обработке слайда: {e}")
                         continue
 
-                # Если новых изображений нет, пробуем пролистнуть или завершаем
-                if len(image_urls) == images_before:
+                    # If we haven't found any images yet, try clicking the slide to reveal more images
+                    if not image_urls and attempts < 5:
+                        try:
+                            driver.execute_script("arguments[0].click();", slide)
+                            time.sleep(0.5)
+
+                            # Try to find modal images
+                            modal_images = driver.find_elements(By.CSS_SELECTOR, "img.photo-zoom__preview")
+                            for img in modal_images:
+                                img_url = extract_and_convert_image_url(img)
+                                if img_url:
+                                    image_urls.add(img_url)
+
+                            # Close modal
+                            actions = ActionChains(driver)
+                            actions.send_keys(Keys.ESCAPE).perform()
+                            time.sleep(0.3)
+                        except Exception as e:
+                            logger.debug(f"Ошибка при попытке кликнуть на слайд: {e}")
+
+                    attempts += 1
+
+                # If we still have no images, try to find the "next" button and navigate through slides
+                if len(image_urls) < 3 and attempts < max_attempts:  # We want at least 3 images if possible
                     try:
                         next_button = WebDriverWait(driver, 2).until(
-                            EC.presence_of_element_located((By.CSS_SELECTOR, "button.swiper-button-next"))
+                            EC.element_to_be_clickable(
+                                (By.CSS_SELECTOR, "button.swiper-button-next, div.slider-control--next"))
                         )
 
+                        # Check if button is disabled
                         if 'swiper-button-disabled' in next_button.get_attribute('class'):
-                            logger.debug("Кнопка Next заблокирована, завершаем.")
-                            break
+                            logger.debug("Кнопка Next заблокирована, все слайды просмотрены.")
+                        else:
+                            # Click and wait for new slides
+                            driver.execute_script("arguments[0].click();", next_button)
+                            time.sleep(0.7)
 
-                        driver.execute_script("arguments[0].click();", next_button)
-                        time.sleep(0.5)
+                            # Process newly visible slides (recursive call would be cleaner but let's avoid it)
+                            new_slides = driver.find_elements(By.CSS_SELECTOR,
+                                                              "li.swiper-slide.j-product-photo:not([style*='display: none'])")
 
-                        # Прерываем если 2 попытки не дали новых изображений после пролистывания
-                        if attempts > 1:
-                            logger.debug("Больше нет новых изображений после пролистывания, завершаем.")
-                            break
+                            if not new_slides:
+                                new_slides = driver.find_elements(By.CSS_SELECTOR, "div.sw-slider-product__item")
 
-                    except TimeoutException:
-                        logger.debug("Кнопка Next не найдена, возможно, все изображения показаны.")
-                        break
+                            for slide in new_slides:
+                                try:
+                                    img_element = slide.find_element(By.CSS_SELECTOR, "img")
+                                    img_url = extract_and_convert_image_url(img_element)
+                                    if img_url:
+                                        image_urls.add(img_url)
+                                except:
+                                    continue
 
-                attempts += 1
+                    except Exception as e:
+                        logger.debug(f"Не удалось найти или нажать кнопку Next: {e}")
+
+            elif current_strategy == "alternate_gallery" or current_strategy == "fallback":
+                # Find all image elements
+                img_elements = driver.find_elements(By.CSS_SELECTOR,
+                                                    "img[src*='/catalog/'], img[data-src*='/catalog/'], img[src*='wbstatic']")
+
+                for img in img_elements:
+                    img_url = extract_and_convert_image_url(img)
+                    if img_url:
+                        image_urls.add(img_url)
 
         except Exception as e:
-            logger.error(f"Критическая ошибка парсера изображений: {str(e)}")
+            logger.error(f"Критическая ошибка при извлечении изображений: {e}")
 
+        logger.info(f"Всего найдено {len(image_urls)} уникальных URL изображений")
         return list(image_urls)
 
     # Add this method if you want to save data URLs as files
@@ -556,7 +668,7 @@ class WildberriesCrawler:
             except Exception as e:
                 logger.error(f"Ошибка при работе с попапом характеристик: {e}")
 
-            images = self.parse_wb_slider_images_high_res_v2(driver, logger)
+            images = self.parse_wb_slider_images_high_quality(driver, logger)
 
             article = self.extract_article_from_url(url)
             logger.info(f"Успешно обработан товар: {article} - {name}")
@@ -700,176 +812,176 @@ class WildberriesCrawler:
         retry_count = 0
         max_consecutive_failures = 3
         consecutive_failures = 0
-        collected_articles_for_category = set()  # Для отслеживания артикулов, собранных в текущей категории
+        consecutive_empty_pages = 0  # NEW: Track empty pages specifically
+        max_consecutive_empty_pages = 5  # NEW: Maximum empty pages before switching
+        max_pages_per_term = 50  # NEW: Maximum pages to try for each search term
+        collected_articles_for_category = set()
 
-        # Keep track of driver sessions
-        driver = None
+        # Alternative search terms
+        alternative_search_terms = self.get_alternative_search_terms(category)
+        current_search_idx = 0
+        current_search_term = category
 
-        while len(urls) < target_count and consecutive_failures < max_consecutive_failures:
+        while len(urls) < target_count:
+            # NEW: Check if we've reached the max pages for current search term
+            if page > max_pages_per_term:
+                logger.warning(f"Достигнут предел страниц ({max_pages_per_term}) для '{current_search_term}'")
+                if current_search_idx < len(alternative_search_terms) - 1:
+                    current_search_idx += 1
+                    current_search_term = alternative_search_terms[current_search_idx]
+                    page = 1  # Reset page counter
+                    consecutive_failures = 0
+                    consecutive_empty_pages = 0  # Reset empty pages counter
+                    logger.info(f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                    continue
+                else:
+                    logger.warning(f"Исчерпаны все поисковые запросы. Завершаем с {len(urls)} товарами.")
+                    break
+
             try:
-                # Create a new driver for each page to avoid session issues
-                if driver:
-                    try:
-                        driver.quit()
-                    except:
-                        pass  # Ignore errors on quit
-
+                # Create a new driver for each page or after several retries
                 driver = self.get_driver()
 
-                # Set script timeout to prevent hanging
-                driver.set_script_timeout(30)
-                driver.set_page_load_timeout(40)
-
-                search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={category}&page={page}"
-                logger.info(f"Загрузка страницы {page} для категории '{category}'")
-
-                # Load the page with error handling
                 try:
+                    search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={current_search_term}&page={page}"
+                    logger.info(f"Загрузка страницы {page} для поискового запроса '{current_search_term}'")
+
                     driver.get(search_url)
-                    time.sleep(random.uniform(3, 7))  # Random delay
-                except Exception as page_load_err:
-                    logger.error(f"Ошибка загрузки страницы: {page_load_err}")
-                    retry_count += 1
-                    if retry_count >= max_retries:
-                        page += 1
-                        retry_count = 0
-                    continue
+                    time.sleep(random.uniform(3, 7))
 
-                # More robust age verification handling
-                try:
-                    result = self.handle_age_verification(driver)
-                    if result:
-                        # If age verification was shown, we should wait a moment
-                        time.sleep(2)
-                except Exception as age_err:
-                    logger.warning(f"Ошибка при проверке возраста: {age_err}")
-                    # Continue anyway, as the page might not have age verification
-
-                # Simulate human behavior with try/except
-                try:
+                    self.handle_age_verification(driver)
                     self.simulate_human_behavior(driver)
-                except Exception as behavior_err:
-                    logger.warning(f"Ошибка при симуляции поведения: {behavior_err}")
 
-                # Wait for products with explicit try/except
-                products_loaded = False
-                try:
-                    products_loaded = self.wait_for_products_load(driver)
-                except Exception as load_err:
-                    logger.error(f"Ошибка при ожидании загрузки товаров: {load_err}")
-
-                if not products_loaded:
-                    consecutive_failures += 1
-                    logger.warning(
-                        f"Не удалось загрузить товары на странице {page} (попытка {consecutive_failures}/{max_consecutive_failures})")
-                    if consecutive_failures >= max_consecutive_failures:
-                        logger.error(
-                            f"Достигнут лимит последовательных неудач. Возможно, бот обнаружен. Переключаемся на следующую категорию.")
-                        break
-                    continue
-
-                consecutive_failures = 0
-
-                # Smooth scroll with error handling
-                try:
-                    self.smooth_scroll(driver, scroll_pause_time=random.uniform(0.7, 1.5),
-                                       scroll_increment=random.randint(40, 60))
-                except Exception as scroll_err:
-                    logger.warning(f"Ошибка при прокрутке страницы: {scroll_err}")
-
-                # Get page source safely
-                try:
-                    page_source = driver.page_source
-                    soup = BeautifulSoup(page_source, 'html.parser')
-                except Exception as source_err:
-                    logger.error(f"Ошибка при получении исходного кода страницы: {source_err}")
-                    retry_count += 1
-                    continue
-
-                # Try both selectors without nested conditions
-                product_links = soup.select("a.product-card__link.j-card-link.j-open-full-product-card")
-                if not product_links:
-                    logger.warning(f"Не найдены ссылки на товары на странице {page}. Пробуем другой селектор.")
-                    product_links = soup.select("a.product-card__main.j-card-link")
-
-                if not product_links:
-                    logger.warning(f"Альтернативный селектор тоже не нашел товары. Попробуем перезагрузить страницу.")
-                    retry_count += 1
-                    if retry_count >= max_retries:
-                        logger.error(f"Достигнут лимит попыток для страницы {page}. Переходим к следующей.")
-                        page += 1
-                        retry_count = 0
-                    continue
-
-                retry_count = 0
-
-                new_urls_count = 0
-                for link in product_links:
-                    href = link.get("href")
-                    if href:
-                        if not href.startswith('http'):
-                            href = 'https://www.wildberries.ru' + href
-
-                        # Извлекаем артикул из URL (пример: .../catalog/221596740/detail.aspx)
-                        article_match = re.search(r'/catalog/(\d+)/detail\.aspx', href)
-                        article = article_match.group(1) if article_match else None
-
-                        if article:
-                            if article not in self.existing_articles and article not in collected_articles_for_category:
-                                urls.append(href)
-                                collected_articles_for_category.add(article)
-                                new_urls_count += 1
-                                if len(urls) >= target_count:
-                                    break
-                            else:
-                                logger.debug(f"Артикул {article} уже собран или в списке существующих. Пропускаем.")
-                        else:
-                            logger.warning(f"Не удалось извлечь артикул из URL: {href}")
-                            if href not in urls:
-                                urls.append(href)
-                                new_urls_count += 1
-                                if len(urls) >= target_count:
-                                    break
-
-                logger.info(
-                    f"Страница {page}: добавлено {new_urls_count} новых ссылок (всего: {len(urls)}/{target_count})")
-
-                if new_urls_count == 0:
-                    consecutive_failures += 1
-                    if consecutive_failures >= max_consecutive_failures:
+                    if not self.wait_for_products_load(driver):
+                        consecutive_failures += 1
                         logger.warning(
-                            f"Слишком много страниц без новых товаров. Возможно, достигнут конец каталога.")
-                        break
-                else:
+                            f"Не удалось загрузить товары на странице {page} (попытка {consecutive_failures}/{max_consecutive_failures})")
+                        if consecutive_failures >= max_consecutive_failures:
+                            if self.try_switch_to_next_search_term(alternative_search_terms, current_search_idx):
+                                current_search_idx += 1
+                                current_search_term = alternative_search_terms[current_search_idx]
+                                page = 1
+                                consecutive_failures = 0
+                                consecutive_empty_pages = 0  # Reset empty pages counter
+                                logger.info(
+                                    f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                            else:
+                                logger.error(f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
+                                break
+                        continue
+
                     consecutive_failures = 0
 
-                page += 1
-                time.sleep(random.uniform(2, 5))  # Random delay between pages
+                    self.smooth_scroll(driver, scroll_pause_time=random.uniform(0.7, 1.5),
+                                       scroll_increment=random.randint(40, 60))
+
+                    soup = BeautifulSoup(driver.page_source, 'html.parser')
+                    product_links = soup.select("a.product-card__link.j-card-link.j-open-full-product-card")
+
+                    if not product_links:
+                        logger.warning(f"Не найдены ссылки на товары на странице {page}. Пробуем другой селектор.")
+                        product_links = soup.select("a.product-card__main.j-card-link")
+
+                        # NEW: Try a third selector that sometimes works on Wildberries
+                        if not product_links:
+                            product_links = soup.select("a[href*='/catalog/'][href*='/detail.aspx']")
+
+                        if not product_links:
+                            logger.warning(f"Все селекторы не нашли товары на странице {page}.")
+                            consecutive_empty_pages += 1  # NEW: Increment empty pages counter
+
+                            # NEW: If we've hit several empty pages in a row, assume we've reached the end
+                            if consecutive_empty_pages >= max_consecutive_empty_pages:
+                                logger.info(
+                                    f"Обнаружено {consecutive_empty_pages} пустых страниц подряд. Вероятно, это конец результатов.")
+                                if current_search_idx < len(alternative_search_terms) - 1:
+                                    current_search_idx += 1
+                                    current_search_term = alternative_search_terms[current_search_idx]
+                                    page = 1
+                                    consecutive_failures = 0
+                                    consecutive_empty_pages = 0
+                                    logger.info(
+                                        f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                                    continue
+                                else:
+                                    logger.warning(
+                                        f"Исчерпаны все поисковые запросы. Завершаем с {len(urls)} товарами.")
+                                    break
+
+                            retry_count += 1
+                            if retry_count >= max_retries:
+                                logger.error(f"Достигнут лимит попыток для страницы {page}. Переходим к следующей.")
+                                page += 1
+                                retry_count = 0
+                            continue
+
+                    retry_count = 0
+                    consecutive_empty_pages = 0  # Reset empty pages counter when we find products
+
+                    new_urls_count = 0
+                    for link in product_links:
+                        href = link.get("href")
+                        if href:
+                            if not href.startswith('http'):
+                                href = 'https://www.wildberries.ru' + href
+
+                            article_match = re.search(r'/catalog/(\d+)/detail\.aspx', href)
+                            article = article_match.group(1) if article_match else None
+
+                            if article:
+                                if article not in self.existing_articles and article not in collected_articles_for_category:
+                                    urls.append(href)
+                                    collected_articles_for_category.add(article)
+                                    new_urls_count += 1
+                                    if len(urls) >= target_count:
+                                        break
+                                else:
+                                    logger.debug(f"Артикул {article} уже собран или в списке существующих. Пропускаем.")
+                            else:
+                                logger.warning(f"Не удалось извлечь артикул из URL: {href}.")
+                                if href not in urls:
+                                    urls.append(href)
+                                    new_urls_count += 1
+                                    if len(urls) >= target_count:
+                                        break
+
+                    logger.info(
+                        f"Страница {page}: добавлено {new_urls_count} новых ссылок (всего: {len(urls)}/{target_count})")
+
+                    if new_urls_count == 0:
+                        consecutive_failures += 1
+                        # NEW: If we find product cards but no new URLs (all duplicates), count it as an empty page too
+                        consecutive_empty_pages += 1
+
+                        if consecutive_failures >= max_consecutive_failures:
+                            if current_search_idx < len(alternative_search_terms) - 1:
+                                current_search_idx += 1
+                                current_search_term = alternative_search_terms[current_search_idx]
+                                page = 1
+                                consecutive_failures = 0
+                                consecutive_empty_pages = 0
+                                logger.info(f"Страницы без новых товаров. Переключаемся на '{current_search_term}'")
+                            else:
+                                logger.warning(
+                                    f"Исчерпаны все альтернативные поисковые запросы. Завершаем с {len(urls)} товарами.")
+                                break
+                    else:
+                        consecutive_failures = 0
+                        consecutive_empty_pages = 0  # Reset when we find new products
+
+                    page += 1
+                    time.sleep(random.uniform(2, 5))
+
+                finally:
+                    driver.quit()
+                    logger.debug("Драйвер закрыт после обработки страницы.")
 
             except Exception as e:
                 logger.error(f"Ошибка при сборе ссылок на странице {page}: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
                 consecutive_failures += 1
-                time.sleep(5)  # Wait after error
-
-                # Force quit and recreate driver on general exception
-                try:
-                    if driver:
-                        driver.quit()
-                        driver = None
-                except:
-                    pass
-
-            finally:
-                # Always try to close the driver in finally block
-                try:
-                    if driver:
-                        driver.quit()
-                        driver = None
-                except Exception as quit_err:
-                    logger.warning(f"Не удалось закрыть драйвер: {quit_err}")
-                    driver = None
+                time.sleep(5)
 
         return urls[:target_count]
 
@@ -959,6 +1071,86 @@ class WildberriesCrawler:
         elapsed_time = end_time - start_time
         logger.info(f"Краулинг завершён за {elapsed_time:.2f} секунд.")
         logger.info(f"Все товары сохранены в каталоге '{self.output_dir}'.")
+
+    def get_alternative_search_terms(self, category: str) -> List[str]:
+        """Генерирует расширенные альтернативные поисковые запросы на основе исходной категории"""
+        # Базовый словарь альтернатив для разных категорий
+        alternatives = {
+            "Пэстис эротик": ["Пэстисы", "Наклейки на грудь", "Украшения на грудь", "Ниппель тэйп", "Пестис"],
+            "Вибраторы": ["Вибратор для женщин", "Женский вибратор", "Вибратор интимный", "Клиторальный вибратор"],
+            "Фаллоимитаторы": ["Дилдо", "Фаллоимитатор для женщин", "Фаллос", "Реалистичный фаллоимитатор"],
+            "Анальные пробки": ["Анальная пробка", "Анальный стимулятор", "Анальная игрушка", "Анальный плаг"],
+            "Мастурбаторы мужские": ["Мастурбатор", "Мужской мастурбатор", "Искусственная вагина", "Fleshlight"],
+            "Страпоны": ["Страпон", "Страпон для пары", "Женский страпон", "Страпон с вибрацией"],
+            "Пульсаторы": ["Пульсатор секс", "Пульсирующий вибратор", "Секс пульсатор", "Thrusting вибратор"],
+            "БДСМ комплекты": ["БДСМ набор", "Набор БДСМ", "БДСМ комплект", "БДСМ аксессуары набор"],
+            "Презервативы": ["Контрацептивы", "Презервативы ультратонкие", "Durex", "Contex"],
+            "Лубриканты": ["Смазка интимная", "Гель-смазка", "Лубрикант", "Интимная смазка"],
+            "Зажимы для сосков": ["Зажимы на соски", "Прищепки для сосков", "Зажимы на грудь", "Nipple clamps"],
+            "Анальные шарики": ["Анальные бусы", "Анальная цепочка", "Анальные шары", "Anal beads"],
+            "Анальные бусы": ["Анальные шарики", "Анальная цепочка с шариками", "Гирлянда анальная",
+                              "Бусы для анального секса"]
+        }
+
+        # Если для категории есть предопределенные альтернативы, используем их
+        if category in alternatives:
+            return [category] + alternatives[category]
+
+        # Генерируем стандартные вариации
+        result = [category]  # Исходная категория всегда первая
+
+        # Удаляем "эротик" и другие суффиксы
+        suffix_words = ["эротик", "для женщин", "для мужчин", "для пар"]
+        for suffix in suffix_words:
+            if category.lower().endswith(f" {suffix}"):
+                clean_category = category[:-len(suffix) - 1].strip()
+                if clean_category and clean_category != category:
+                    result.append(clean_category)
+                    break
+
+        # Удаляем спецсимволы
+        clean_category = re.sub(r'[^\w\s]', '', category)
+        if clean_category != category:
+            result.append(clean_category)
+
+        # Добавляем вариации во множественном/единственном числе
+        if category.endswith("ы"):
+            singular = category[:-1]
+            result.append(singular)
+        elif not category.endswith("ы") and not category.endswith("и"):
+            plural = category + "ы"
+            result.append(plural)
+
+        # Для категорий, содержащих несколько слов
+        words = category.split()
+        if len(words) > 1:
+            # Основное слово отдельно
+            main_word = words[0]  # или другая логика определения основного слова
+            if len(main_word) > 3:  # Проверка, чтобы не добавлять предлоги
+                result.append(main_word)
+
+            # Перестановки слов
+            for i in range(1, len(words)):
+                rotated = ' '.join(words[i:] + words[:i])
+                if rotated != category:
+                    result.append(rotated)
+
+        # Для эротических товаров добавляем вариации
+        adult_keywords = ["интимный", "секс", "для взрослых"]
+        if any(word in category.lower() for word in ["эротик", "секс", "бдсм", "анальн"]):
+            for word in adult_keywords:
+                if word not in category.lower():
+                    result.append(f"{category} {word}")
+
+        # Удаляем дубликаты, сохраняя порядок
+        unique_results = []
+        seen = set()
+        for term in result:
+            if term.lower() not in seen:
+                unique_results.append(term)
+                seen.add(term.lower())
+
+        return unique_results
 
 
 if __name__ == "__main__":
