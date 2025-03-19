@@ -12,12 +12,9 @@ from queue import Queue, Empty
 from selenium.webdriver import ActionChains, Keys
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.chrome.service import Service
 from selenium import webdriver
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, ElementClickInterceptedException
-from fake_useragent import UserAgent
 from bs4 import BeautifulSoup
 from typing import Dict, List
 from loguru import logger
@@ -812,26 +809,23 @@ class WildberriesCrawler:
         retry_count = 0
         max_consecutive_failures = 3
         consecutive_failures = 0
-        consecutive_empty_pages = 0  # NEW: Track empty pages specifically
-        max_consecutive_empty_pages = 5  # NEW: Maximum empty pages before switching
-        max_pages_per_term = 50  # NEW: Maximum pages to try for each search term
+        max_pages_per_term = 50  # НОВОЕ: Максимум страниц для каждого поискового запроса
         collected_articles_for_category = set()
 
-        # Alternative search terms
+        # Альтернативные поисковые запросы
         alternative_search_terms = self.get_alternative_search_terms(category)
         current_search_idx = 0
         current_search_term = category
 
         while len(urls) < target_count:
-            # NEW: Check if we've reached the max pages for current search term
+            # НОВОЕ: Проверяем лимит страниц для текущего поискового запроса
             if page > max_pages_per_term:
                 logger.warning(f"Достигнут предел страниц ({max_pages_per_term}) для '{current_search_term}'")
                 if current_search_idx < len(alternative_search_terms) - 1:
                     current_search_idx += 1
                     current_search_term = alternative_search_terms[current_search_idx]
-                    page = 1  # Reset page counter
+                    page = 1  # Сбрасываем счетчик страниц
                     consecutive_failures = 0
-                    consecutive_empty_pages = 0  # Reset empty pages counter
                     logger.info(f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
                     continue
                 else:
@@ -839,7 +833,7 @@ class WildberriesCrawler:
                     break
 
             try:
-                # Create a new driver for each page or after several retries
+                # Создаем новый драйвер для каждой страницы
                 driver = self.get_driver()
 
                 try:
@@ -862,7 +856,6 @@ class WildberriesCrawler:
                                 current_search_term = alternative_search_terms[current_search_idx]
                                 page = 1
                                 consecutive_failures = 0
-                                consecutive_empty_pages = 0  # Reset empty pages counter
                                 logger.info(
                                     f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
                             else:
@@ -882,30 +875,28 @@ class WildberriesCrawler:
                         logger.warning(f"Не найдены ссылки на товары на странице {page}. Пробуем другой селектор.")
                         product_links = soup.select("a.product-card__main.j-card-link")
 
-                        # NEW: Try a third selector that sometimes works on Wildberries
+                        # Пробуем третий селектор, который иногда работает на Wildberries
                         if not product_links:
                             product_links = soup.select("a[href*='/catalog/'][href*='/detail.aspx']")
 
                         if not product_links:
-                            logger.warning(f"Все селекторы не нашли товары на странице {page}.")
-                            consecutive_empty_pages += 1  # NEW: Increment empty pages counter
+                            logger.warning(f"Не найдены ссылки на товары через все селекторы на странице {page}")
+                            consecutive_failures += 1
 
-                            # NEW: If we've hit several empty pages in a row, assume we've reached the end
-                            if consecutive_empty_pages >= max_consecutive_empty_pages:
-                                logger.info(
-                                    f"Обнаружено {consecutive_empty_pages} пустых страниц подряд. Вероятно, это конец результатов.")
-                                if current_search_idx < len(alternative_search_terms) - 1:
+                            if consecutive_failures >= max_consecutive_failures:
+                                logger.warning(
+                                    f"Достигнуто максимальное число неудачных попыток подряд. Пробуем другой запрос.")
+                                if self.try_switch_to_next_search_term(alternative_search_terms, current_search_idx):
                                     current_search_idx += 1
                                     current_search_term = alternative_search_terms[current_search_idx]
                                     page = 1
                                     consecutive_failures = 0
-                                    consecutive_empty_pages = 0
                                     logger.info(
                                         f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
                                     continue
                                 else:
-                                    logger.warning(
-                                        f"Исчерпаны все поисковые запросы. Завершаем с {len(urls)} товарами.")
+                                    logger.error(
+                                        f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
                                     break
 
                             retry_count += 1
@@ -916,7 +907,6 @@ class WildberriesCrawler:
                             continue
 
                     retry_count = 0
-                    consecutive_empty_pages = 0  # Reset empty pages counter when we find products
 
                     new_urls_count = 0
                     for link in product_links:
@@ -950,16 +940,13 @@ class WildberriesCrawler:
 
                     if new_urls_count == 0:
                         consecutive_failures += 1
-                        # NEW: If we find product cards but no new URLs (all duplicates), count it as an empty page too
-                        consecutive_empty_pages += 1
 
                         if consecutive_failures >= max_consecutive_failures:
-                            if current_search_idx < len(alternative_search_terms) - 1:
+                            if self.try_switch_to_next_search_term(alternative_search_terms, current_search_idx):
                                 current_search_idx += 1
                                 current_search_term = alternative_search_terms[current_search_idx]
                                 page = 1
                                 consecutive_failures = 0
-                                consecutive_empty_pages = 0
                                 logger.info(f"Страницы без новых товаров. Переключаемся на '{current_search_term}'")
                             else:
                                 logger.warning(
@@ -967,10 +954,9 @@ class WildberriesCrawler:
                                 break
                     else:
                         consecutive_failures = 0
-                        consecutive_empty_pages = 0  # Reset when we find new products
 
                     page += 1
-                    time.sleep(random.uniform(2, 5))
+                    time.sleep(random.uniform(2, 5))  # Случайная задержка между страницами
 
                 finally:
                     driver.quit()
@@ -981,9 +967,13 @@ class WildberriesCrawler:
                 import traceback
                 logger.error(traceback.format_exc())
                 consecutive_failures += 1
-                time.sleep(5)
+                time.sleep(5)  # Пауза после ошибки
 
         return urls[:target_count]
+
+    def try_switch_to_next_search_term(self, alternative_terms: List[str], current_idx: int) -> bool:
+        """Проверяет, можно ли переключиться на следующий поисковый термин"""
+        return current_idx < len(alternative_terms) - 1
 
     def simulate_human_behavior(self, driver):
         """Симулирует поведение человека для обхода обнаружения бота"""
