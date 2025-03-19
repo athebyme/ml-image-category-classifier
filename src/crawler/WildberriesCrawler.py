@@ -9,6 +9,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 
+from fake_useragent import UserAgent
 from selenium.webdriver import ActionChains, Keys
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -63,59 +64,52 @@ class WildberriesCrawler:
         logger.info("Инициализация WildberriesCrawler завершена.")
 
     def get_driver(self):
-        from selenium.webdriver.chrome.service import Service
-        import random
-        import time
-
-        # Define Chrome options
         options = webdriver.ChromeOptions()
         options.add_argument("--headless=new")
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-extensions")
+
+        # Добавляем новые аргументы для стабильности
+        options.add_argument("--disable-infobars")
+        options.add_argument("--disable-browser-side-navigation")
+        options.add_argument("--ignore-certificate-errors")
+        options.add_argument("--disable-translate")
+        options.add_argument("--remote-debugging-port=9222")
+        options.add_argument("--start-maximized")
         options.add_argument("--window-size=1920,1080")
 
-        # Add user agent
-        from fake_useragent import UserAgent
-        ua = UserAgent()
-        user_agent = ua.random
+        # Настраиваем логи
+        options.add_argument("--log-level=3")  # Минимализируем логи
+        options.add_argument("--silent")
+
+        # Устанавливаем явный путь к user-data-dir
+        options.add_argument(f"--user-data-dir=/tmp/chrome-user-data-{random.randint(1, 1000)}")
+
+        # Эмуляция пользовательского агента
+        user_agent = UserAgent().random
         options.add_argument(f"user-agent={user_agent}")
 
-        # Add proxy if available
-        if hasattr(self, 'proxies') and self.proxies:
-            proxy = random.choice(self.proxies)
-            options.add_argument(f'--proxy-server={proxy}')
-
-        # Set specific path to ChromeDriver
-        chromedriver_path = "/usr/local/bin/chromedriver"  # Adjust this to your actual path
-
-        # Try to create driver with explicit service
+        # Пробуем создать драйвер с корректной обработкой ошибок
         try:
-            service = Service(executable_path=chromedriver_path)
-            driver = webdriver.Chrome(service=service, options=options)
-
-            # Set timeouts
-            driver.set_page_load_timeout(30)
-            driver.set_script_timeout(30)
-
-            # Clear cookies
-            driver.delete_all_cookies()
-
-            # Test if driver works
-            driver.get("about:blank")
-
+            driver = webdriver.Chrome(options=options)
             return driver
         except Exception as e:
             logger.error(f"Ошибка при создании драйвера: {e}")
-            # Wait and retry
-            time.sleep(3)
+            time.sleep(5)  # Ждем перед повторной попыткой
+
+            # Пробуем с другим путем к ChromeDriver
             try:
-                # Try simpler initialization
-                driver = webdriver.Chrome(options=options)
+                # Используем webdriver_manager как запасной вариант
+                from webdriver_manager.chrome import ChromeDriverManager
+                from selenium.webdriver.chrome.service import Service
+
+                service = Service(ChromeDriverManager().install())
+                driver = webdriver.Chrome(service=service, options=options)
                 return driver
             except Exception as e2:
-                logger.error(f"Повторная ошибка: {e2}")
+                logger.error(f"Вторая попытка создания драйвера не удалась: {e2}")
                 raise
 
     def handle_age_verification(self, driver):
