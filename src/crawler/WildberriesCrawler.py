@@ -92,7 +92,7 @@ class WildberriesCrawler:
             options.add_argument(f'--proxy-server={proxy}')
 
         # Set specific path to ChromeDriver
-        chromedriver_path = "/usr/local/bin/chromedriver"  # Adjust this to your actual path
+        chromedriver_path = "/usr/local/bin/chromedriver/chromedriver"  # Adjust this to your actual path
 
         # Try to create driver with explicit service
         try:
