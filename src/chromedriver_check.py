@@ -16,7 +16,7 @@ try:
     print("Драйвер успешно создан!")
 
     # Тестовый переход
-    driver.get('https://www.example.com')
+    driver.get('https://google.com')
     print("Успешный переход на страницу")
 
     driver.quit()
