@@ -1,5 +1,8 @@
 import logging
+import math
 import random
+import signal
+import sys
 import time
 import os
 import json
@@ -11,6 +14,7 @@ from queue import Queue, Empty
 
 from fake_useragent import UserAgent
 from selenium.webdriver import ActionChains, Keys
+from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium import webdriver
@@ -30,6 +34,21 @@ display.start()
 logger.remove()
 logger.add("crawler.log", format="{time} {level} {message}", level="INFO", rotation="5 MB")
 
+
+def create_empty_proxies_file(self):
+    """
+    Создает пустой файл proxies.txt с комментариями о формате
+    """
+    try:
+        with open("proxies.txt", "w", encoding="utf-8") as f:
+            f.write("# Файл для списка прокси\n")
+            f.write("# Формат: ip:port или user:pass@ip:port\n")
+            f.write("# Примеры:\n")
+            f.write("# 192.168.1.1:8080\n")
+            f.write("# username:password@192.168.1.1:8080\n")
+        logger.info("Создан пустой файл proxies.txt")
+    except Exception as e:
+        logger.error(f"Ошибка при создании файла с прокси: {e}")
 
 class ExponentialBackoff:
     def __init__(self, initial_delay=5, max_delay=300, factor=2):
@@ -60,11 +79,153 @@ class WildberriesCrawler:
         self.backoff = ExponentialBackoff()
         os.makedirs(self.output_dir, exist_ok=True)
         self.existing_articles = self.load_existing_articles()
+        self.rate_limit_attempts = 0
+        self.active_drivers = []  # Для отслеживания активных драйверов
+        self.processed_categories = []
+        self.urls_collected = 0
+        self.products_processed = 0
 
-        # Optional: Set up proxy list if available
-        self.proxies = []  # Add your proxies here if available
+        # Инициализация атрибутов для прокси
+        self.proxy_index = 0
+        self.proxies = self.load_proxies()
+
+        # Настройка обработчиков сигналов
+        signal.signal(signal.SIGINT, self.handle_shutdown)
+        signal.signal(signal.SIGTERM, self.handle_shutdown)
 
         logger.info("Инициализация WildberriesCrawler завершена.")
+
+    def handle_rate_limit(self):
+        """
+        Применяет экспоненциальную задержку при обнаружении ограничения запросов
+        без использования прокси
+        """
+        # Базовая задержка - начинаем с 5 секунд
+        base_delay = 5
+
+        # Увеличиваем задержку с каждой попыткой, но не более 5 минут
+        attempt = getattr(self, 'rate_limit_attempts', 0) + 1
+        setattr(self, 'rate_limit_attempts', attempt)
+
+        # Формула для экспоненциальной задержки: базовая_задержка * 2^попытка
+        delay = min(base_delay * (2 ** attempt), 300)  # Максимум 300 секунд (5 минут)
+
+        # Добавляем случайное отклонение ±20% для маскировки автоматизации
+        jitter = random.uniform(0.8, 1.2)
+        actual_delay = delay * jitter
+
+        logger.warning(
+            f"Обнаружено возможное ограничение запросов. Ожидание {actual_delay:.2f} секунд (попытка {attempt})")
+
+        # Пауза с обратным отсчетом, чтобы видеть прогресс в логах
+        for i in range(int(actual_delay), 0, -10):
+            remaining = min(i, 10)  # Выводим каждые 10 секунд или меньше
+            if i <= 30 or i % 30 == 0:  # Сокращаем количество записей в лог
+                logger.debug(f"Осталось ждать: {i} секунд")
+            time.sleep(remaining)
+
+        # Сбрасываем счетчик попыток после длительной паузы
+        if actual_delay > 60:
+            setattr(self, 'rate_limit_attempts', 0)
+            logger.info("Счетчик попыток сброшен после длительной паузы")
+
+        return actual_delay
+
+    def handle_shutdown(self, signum, frame):
+        """
+        Обрабатывает корректное завершение при получении сигналов
+        """
+        signal_names = {
+            signal.SIGINT: "SIGINT (Ctrl+C)",
+            signal.SIGTERM: "SIGTERM"
+        }
+
+        signal_name = signal_names.get(signum, f"сигнал {signum}")
+        logger.warning(f"Получен сигнал завершения {signal_name}. Выполняется очистка ресурсов...")
+
+        # Сохраняем текущее состояние, если нужно
+        try:
+            # Записываем в файл информацию о состоянии краулера
+            status_info = {
+                "timestamp": time.time(),
+                "categories_processed": getattr(self, 'processed_categories', []),
+                "urls_collected": getattr(self, 'urls_collected', 0),
+                "products_processed": getattr(self, 'products_processed', 0)
+            }
+
+            import json
+            with open("crawler_state.json", "w", encoding="utf-8") as f:
+                json.dump(status_info, f, ensure_ascii=False, indent=2)
+
+            logger.info("Состояние краулера сохранено в crawler_state.json")
+        except Exception as e:
+            logger.error(f"Ошибка при сохранении состояния: {e}")
+
+        # Закрываем все драйверы
+        try:
+            logger.info("Закрытие всех драйверов...")
+            # Если у вас есть список активных драйверов
+            active_drivers = getattr(self, 'active_drivers', [])
+            for driver in active_drivers:
+                try:
+                    driver.quit()
+                except:
+                    pass
+        except Exception as e:
+            logger.error(f"Ошибка при закрытии драйверов: {e}")
+
+        # Если используется виртуальный дисплей
+        try:
+            if 'display' in globals() and display:
+                logger.info("Остановка виртуального дисплея...")
+                display.stop()
+        except Exception as e:
+            logger.error(f"Ошибка при остановке виртуального дисплея: {e}")
+
+        # Убиваем все процессы Chrome
+        try:
+            logger.info("Завершение процессов Chrome...")
+            import subprocess
+            subprocess.run(['pkill', '-f', 'chrome'], stderr=subprocess.DEVNULL)
+            time.sleep(1)  # Ждем завершения процессов
+        except Exception as e:
+            logger.error(f"Ошибка при завершении процессов Chrome: {e}")
+
+        # Финальное сообщение
+        logger.info("Завершение работы краулера...")
+
+        # Корректно завершаем работу программы
+        sys.exit(0)
+
+    def load_proxies(self):
+        """
+        Загружает список прокси из файла или возвращает пустой список,
+        если файл не найден или пуст
+        """
+        try:
+            proxy_file = "proxies.txt"  # Путь к файлу с прокси
+            if os.path.exists(proxy_file):
+                with open(proxy_file, "r", encoding="utf-8") as f:
+                    proxies = [line.strip() for line in f if line.strip()]
+                logger.info(f"Загружено {len(proxies)} прокси из файла {proxy_file}")
+                return proxies
+            else:
+                logger.warning(f"Файл с прокси {proxy_file} не найден")
+                return []
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке прокси: {e}")
+            return []
+
+    def get_next_proxy(self):
+        """
+        Возвращает следующий прокси из списка или None, если список пуст
+        """
+        if not self.proxies:
+            return None
+
+        proxy = self.proxies[self.proxy_index]
+        self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
+        return proxy
 
     def get_driver(self):
         from selenium.webdriver.chrome.service import Service
@@ -78,7 +239,18 @@ class WildberriesCrawler:
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--disable-gpu")
         options.add_argument("--disable-extensions")
-        options.add_argument("--window-size=1920,1080")
+
+        resolutions = [(1366, 768), (1920, 1080), (1536, 864), (1440, 900)]
+        width, height = random.choice(resolutions)
+        options.add_argument(f"--window-size={width},{height}")
+
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        # Важно: добавляем эти опции для избежания проблем с DevTools
+        options.add_argument("--disable-dev-tools")
+        options.add_argument("--remote-debugging-port=9222")
 
         # Add user agent
         from fake_useragent import UserAgent
@@ -86,10 +258,13 @@ class WildberriesCrawler:
         user_agent = ua.random
         options.add_argument(f"user-agent={user_agent}")
 
-        # Add proxy if available
-        if hasattr(self, 'proxies') and self.proxies:
-            proxy = random.choice(self.proxies)
+        # Получаем прокси, если они доступны
+        proxy = self.get_next_proxy()
+        if proxy:
+            logger.info(f"Используем прокси: {proxy}")
             options.add_argument(f'--proxy-server={proxy}')
+        else:
+            logger.debug("Прокси не используется (список пуст)")
 
         # Set specific path to ChromeDriver
         chromedriver_path = "/usr/local/bin/chromedriver/chromedriver"  # Adjust this to your actual path
@@ -109,6 +284,9 @@ class WildberriesCrawler:
             # Test if driver works
             driver.get("about:blank")
 
+            # Добавляем в список активных
+            self.active_drivers.append(driver)
+
             return driver
         except Exception as e:
             logger.error(f"Ошибка при создании драйвера: {e}")
@@ -117,6 +295,7 @@ class WildberriesCrawler:
             try:
                 # Try simpler initialization
                 driver = webdriver.Chrome(options=options)
+                self.active_drivers.append(driver)
                 return driver
             except Exception as e2:
                 logger.error(f"Повторная ошибка: {e2}")
@@ -763,47 +942,46 @@ class WildberriesCrawler:
 
     def wait_for_products_load(self, driver):
         try:
-            # First try the original selector
-            try:
-                WebDriverWait(driver, 10).until(
-                    EC.presence_of_all_elements_located((By.CLASS_NAME, "product-card__wrapper"))
-                )
-                logger.info("Карточки товаров успешно загружены (основной селектор).")
-                return True
-            except TimeoutException:
-                logger.warning("Основной селектор не сработал, пробуем альтернативные...")
+            # First ensure the page itself is fully loaded
+            WebDriverWait(driver, 15).until(
+                lambda d: d.execute_script('return document.readyState') == 'complete'
+            )
 
-                # Try alternative selectors
+            # Add random delays to appear more human-like
+            time.sleep(random.uniform(2, 5))
+
+            # Try multiple selectors in sequence with proper error handling
+            selectors = [
+                ".product-card__wrapper",
+                ".product-card",
+                "a.j-card-link",
+                "[data-card-index]",  # Add more alternative selectors
+                ".catalog-page .product-card"
+            ]
+
+            for selector in selectors:
                 try:
-                    WebDriverWait(driver, 10).until(
-                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, ".product-card"))
+                    WebDriverWait(driver, 8).until(
+                        EC.presence_of_all_elements_located((By.CSS_SELECTOR, selector))
                     )
-                    logger.info("Карточки товаров успешно загружены (альтернативный селектор 1).")
+                    logger.info(f"Products loaded successfully using selector: {selector}")
                     return True
                 except TimeoutException:
-                    try:
-                        WebDriverWait(driver, 10).until(
-                            EC.presence_of_all_elements_located((By.CSS_SELECTOR, "a.j-card-link"))
-                        )
-                        logger.info("Карточки товаров успешно загружены (альтернативный селектор 2).")
-                        return True
-                    except TimeoutException:
-                        logger.error("Не удалось найти товары на странице по всем селекторам.")
+                    logger.debug(f"Selector {selector} failed, trying next")
+                    continue
 
-                        # Take screenshot for debugging
-                        timestamp = int(time.time())
-                        screenshot_path = f"error_page_{timestamp}.png"
-                        driver.save_screenshot(screenshot_path)
-                        logger.info(f"Сохранен скриншот проблемной страницы: {screenshot_path}")
+            # If we got here, all selectors failed
+            logger.error("All product selectors failed")
 
-                        # Get page source for debugging
-                        with open(f"error_page_{timestamp}.html", "w", encoding="utf-8") as f:
-                            f.write(driver.page_source)
-                        logger.info(f"Сохранен HTML проблемной страницы: error_page_{timestamp}.html")
+            # Take a screenshot for debugging
+            timestamp = int(time.time())
+            screenshot_path = f"error_page_{timestamp}.png"
+            driver.save_screenshot(screenshot_path)
+            logger.info(f"Saved error screenshot: {screenshot_path}")
 
-                        return False
+            return False
         except Exception as e:
-            logger.error(f"Непредвиденная ошибка при ожидании загрузки товаров: {e}")
+            logger.error(f"Unexpected error waiting for products: {e}")
             return False
 
     def collect_product_urls(self, category: str, target_count: int) -> List[str]:
@@ -815,6 +993,18 @@ class WildberriesCrawler:
         consecutive_failures = 0
         max_pages_per_term = 50  # НОВОЕ: Максимум страниц для каждого поискового запроса
         collected_articles_for_category = set()
+        base_delay = 5
+        error_count = 0
+
+        circuit_breaker = {
+            "failures": 0,
+            "threshold": 5,
+            "is_open": False,
+            "reset_after": 180  # seconds
+        }
+
+        circuit_open_time = None
+        success = False
 
         # Альтернативные поисковые запросы
         alternative_search_terms = self.get_alternative_search_terms(category)
@@ -822,6 +1012,23 @@ class WildberriesCrawler:
         current_search_term = category
 
         while len(urls) < target_count:
+            if circuit_breaker["is_open"]:
+                current_time = time.time()
+                if circuit_open_time and (current_time - circuit_open_time > circuit_breaker["reset_after"]):
+                    # Reset circuit breaker
+                    circuit_breaker["is_open"] = False
+                    circuit_breaker["failures"] = 0
+                    logger.info("Circuit breaker reset after cooling period")
+                else:
+                    logger.warning("Circuit breaker open, pausing requests")
+                    time.sleep(30)  # Wait before checking again
+                    continue
+
+            if consecutive_failures > 0:
+                delay = base_delay * (1.5 ** consecutive_failures)
+                logger.info(f"Increasing delay to {delay:.2f}s due to failures")
+                time.sleep(delay)
+
             # НОВОЕ: Проверяем лимит страниц для текущего поискового запроса
             if page > max_pages_per_term:
                 logger.warning(f"Достигнут предел страниц ({max_pages_per_term}) для '{current_search_term}'")
@@ -958,6 +1165,19 @@ class WildberriesCrawler:
                                 break
                     else:
                         consecutive_failures = 0
+                        success = True
+
+                    if not success:  # Define a success indicator in your code
+                        circuit_breaker["failures"] += 1
+                        if circuit_breaker["failures"] >= circuit_breaker["threshold"]:
+                            circuit_breaker["is_open"] = True
+                            circuit_open_time = time.time()
+                            logger.warning("Circuit breaker opened due to repeated failures")
+
+                            # Potentially switch search term or proxy here
+                            if current_search_idx < len(alternative_search_terms) - 1:
+                                current_search_idx += 1
+                                current_search_term = alternative_search_terms[current_search_idx]
 
                     page += 1
                     time.sleep(random.uniform(2, 5))  # Случайная задержка между страницами
@@ -1044,27 +1264,55 @@ class WildberriesCrawler:
 
     def run(self):
         logger.info("Запуск краулера Wildberries...")
+
+        if not display.is_alive():
+            display.start()
+
         start_time = time.time()
+        all_tasks = []
+        actual_workers = min(4, self.max_workers)
+
         for category, target_count in self.category_targets.items():
             logger.info(f"Сбор ссылок для категории: {category} (цель: {target_count} товаров)")
             product_urls = self.collect_product_urls(category, target_count)
             logger.info(f"Для категории {category} собрано {len(product_urls)} ссылок.")
 
             for url in product_urls:
+                all_tasks.append((url, category))
+
+        logger.info(f"Начало обработки товаров категории: {category} с использованием {self.max_workers} воркеров.")
+        batch_size = 100
+        for i in range(0, len(all_tasks), batch_size):
+            batch = all_tasks[i:i + batch_size]
+            logger.info(f"Processing batch {i // batch_size + 1}/{math.ceil(len(all_tasks) / batch_size)}")
+
+            for url, category in batch:
                 self.products_queue.put((url, category))
 
-            logger.info(f"Начало обработки товаров категории: {category} с использованием {self.max_workers} воркеров.")
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                workers = [executor.submit(self.worker) for _ in range(self.max_workers)]
+            with ThreadPoolExecutor(max_workers=actual_workers) as executor:
+                workers = [executor.submit(self.worker) for _ in
+                           range(min(self.max_workers, self.products_queue.qsize()))]
                 for worker in as_completed(workers):
-                    worker.result()
+                    try:
+                        worker.result()
+                    except Exception as e:
+                        logger.error(f"Worker failed: {e}")
 
+            logger.info(f"Batch {i // batch_size + 1} complete")
+
+            wait_time = random.uniform(30, 60)
+            time.sleep(wait_time)
             logger.info(f"Обработка категории {category} завершена.")
 
         end_time = time.time()
         elapsed_time = end_time - start_time
         logger.info(f"Краулинг завершён за {elapsed_time:.2f} секунд.")
         logger.info(f"Все товары сохранены в каталоге '{self.output_dir}'.")
+
+        try:
+            display.stop()
+        except:
+            pass
 
     def get_alternative_search_terms(self, category: str) -> List[str]:
         """Генерирует расширенные альтернативные поисковые запросы на основе исходной категории"""
@@ -1282,4 +1530,8 @@ if __name__ == "__main__":
     category_targets_needed = category_targets_needed_scaled
 
     crawler = WildberriesCrawler(category_targets_needed_scaled, max_workers=12)
+
+    if not os.path.exists("proxies.txt"):
+        crawler.create_empty_proxies_file()
+
     crawler.run()
