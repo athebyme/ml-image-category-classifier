@@ -93,7 +93,507 @@ class WildberriesCrawler:
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 
+        self.cookies_dir = "./cookies"
+        os.makedirs(self.cookies_dir, exist_ok=True)
+
         logger.info("Инициализация WildberriesCrawler завершена.")
+
+    def load_cookies(self, driver, category):
+        """Load cookies from previous session if available"""
+        cookie_file = os.path.join(self.cookies_dir, f"{category.replace(' ', '_')}.json")
+
+        if os.path.exists(cookie_file):
+            with open(cookie_file, 'r') as f:
+                cookies = json.load(f)
+                for cookie in cookies:
+                    if 'expiry' in cookie:
+                        del cookie['expiry']  # Remove expiry to avoid errors
+                    try:
+                        driver.add_cookie(cookie)
+                    except:
+                        pass
+            return True
+        return False
+
+    def save_cookies(self, driver, category):
+        """Save cookies for future use"""
+        cookie_file = os.path.join(self.cookies_dir, f"{category.replace(' ', '_')}.json")
+        cookies = driver.get_cookies()
+        with open(cookie_file, 'w') as f:
+            json.dump(cookies, f)
+
+    def detect_captcha(self, driver):
+        """
+        Detects if we're on a CAPTCHA page
+        Returns: True if CAPTCHA is detected, False otherwise
+        """
+        try:
+            # Check for common CAPTCHA identifiers
+            captcha_selectors = [
+                (By.ID, "__wbaas_captcha_container"),
+                (By.XPATH, "//div[contains(@class, 'captcha')]"),
+                (By.XPATH, "//title[contains(text(), 'Почти готово')]"),
+                (By.XPATH, "//p[contains(text(), 'IP-адрес')]"),
+            ]
+
+            for selector_type, selector in captcha_selectors:
+                try:
+                    element = driver.find_element(selector_type, selector)
+                    if element:
+                        logger.warning("CAPTCHA detected on page!")
+                        return True
+                except:
+                    continue
+
+            # Also check for patterns in URL or page source that indicate verification
+            if "/__wbaas/challenges/captcha/" in driver.current_url or "/__wbaas/challenges/captcha/" in driver.page_source:
+                logger.warning("CAPTCHA challenge URL detected!")
+                return True
+
+            return False
+        except Exception as e:
+            logger.error(f"Error while checking for CAPTCHA: {e}")
+            return False
+
+    def handle_captcha(self, driver):
+        """
+        Attempts to handle CAPTCHA challenges with 2captcha
+        Returns: True if successfully handled or no CAPTCHA, False if CAPTCHA couldn't be solved
+        """
+        if not self.detect_captcha(driver):
+            return True  # No CAPTCHA detected
+
+        try:
+            # Take screenshot for potential manual intervention
+            timestamp = int(time.time())
+            screenshot_path = f"captcha_{timestamp}.png"
+            driver.save_screenshot(screenshot_path)
+
+            # Save page HTML for analysis
+            html_path = f"captcha_{timestamp}.html"
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(driver.page_source)
+
+            logger.info(f"CAPTCHA detected! Screenshot saved to {screenshot_path}, HTML to {html_path}")
+
+            # Try to solve using 2captcha (free trial)
+            try:
+                # Import 2captcha library
+                from twocaptcha import TwoCaptcha
+
+                # Find the type of captcha Wildberries is using
+                captcha_type = self.identify_captcha_type(driver)
+
+                if captcha_type == "image":
+                    # Solve image captcha
+                    return self.solve_image_captcha(driver, screenshot_path)
+                elif captcha_type == "recaptcha":
+                    # Solve reCAPTCHA
+                    return self.solve_recaptcha(driver)
+                elif captcha_type == "hcaptcha":
+                    # Solve hCaptcha
+                    return self.solve_hcaptcha(driver)
+                else:
+                    logger.warning(f"Unknown CAPTCHA type: {captcha_type}")
+
+            except ImportError:
+                logger.warning("2captcha library not installed. Run: pip install 2captcha-python")
+            except Exception as e:
+                logger.error(f"Error using 2captcha: {e}")
+
+            # If we get here, automated solving failed - try manual intervention
+            is_headless = "--headless" in str(driver.capabilities.get("chrome", {}).get("chromedriverArgs", []))
+            if not is_headless:
+                wait_time = 60  # 60 seconds for manual intervention
+                logger.info(f"Waiting {wait_time} seconds for manual CAPTCHA solving...")
+                time.sleep(wait_time)
+
+                # Check if we're still on CAPTCHA page
+                if not self.detect_captcha(driver):
+                    logger.info("CAPTCHA appears to have been solved manually!")
+                    return True
+
+            # Last resort: try refreshing and see if we get lucky
+            logger.warning("Failed to solve CAPTCHA. Trying to refresh the page...")
+            driver.refresh()
+            time.sleep(5)
+
+            return not self.detect_captcha(driver)  # Return True if CAPTCHA is gone after refresh
+
+        except Exception as e:
+            logger.error(f"Error while trying to handle CAPTCHA: {e}")
+            return False
+
+    def identify_captcha_type(self, driver):
+        """Identify the type of CAPTCHA present on the page"""
+        try:
+            # Check for image CAPTCHA (typically used by Wildberries)
+            if driver.find_elements(By.XPATH, "//img[contains(@src, 'captcha') or contains(@class, 'captcha')]"):
+                return "image"
+
+            # Check for reCAPTCHA
+            if driver.find_elements(By.XPATH,
+                                    "//div[contains(@class, 'g-recaptcha')]") or "www.google.com/recaptcha" in driver.page_source:
+                return "recaptcha"
+
+            # Check for hCaptcha
+            if driver.find_elements(By.XPATH,
+                                    "//div[contains(@class, 'h-captcha')]") or "hcaptcha.com" in driver.page_source:
+                return "hcaptcha"
+
+            # Default to image CAPTCHA for Wildberries (most common)
+            return "image"
+        except:
+            return "image"  # Default to image CAPTCHA if detection fails
+
+    def solve_image_captcha(self, driver, screenshot_path):
+        """Solve image CAPTCHA using 2captcha"""
+        try:
+            from twocaptcha import TwoCaptcha, NetworkException
+            import time
+            import base64
+            import os
+
+            # Get your API key - sign up for free trial at 2captcha.com
+            api_key = os.environ.get('CAPTCHA_API_KEY', 'YOUR_2CAPTCHA_API_KEY')
+
+            # Create solver instance
+            solver = TwoCaptcha(api_key)
+
+            # Try to find the CAPTCHA image element
+            captcha_img = None
+            possible_selectors = [
+                "//img[contains(@src, 'captcha')]",
+                "//div[contains(@class, 'captcha')]//img",
+                "//div[@id='__wbaas_captcha_container']//img"
+            ]
+
+            for selector in possible_selectors:
+                try:
+                    elements = driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        captcha_img = elements[0]
+                        break
+                except:
+                    continue
+
+            if captcha_img:
+                # Get image directly from the element
+                # First try to get src
+                img_src = captcha_img.get_attribute('src')
+
+                if img_src and not img_src.startswith('data:'):
+                    # Download the image
+                    import requests
+                    img_response = requests.get(img_src, timeout=10)
+                    if img_response.status_code == 200:
+                        with open('current_captcha.png', 'wb') as f:
+                            f.write(img_response.content)
+                        captcha_file = 'current_captcha.png'
+                    else:
+                        # If download fails, use screenshot
+                        captcha_file = screenshot_path
+                else:
+                    # Take screenshot of just the CAPTCHA image
+                    captcha_img.screenshot('captcha_element.png')
+                    captcha_file = 'captcha_element.png'
+            else:
+                # If we can't find the specific element, use the full screenshot
+                captcha_file = screenshot_path
+
+            logger.info(f"Sending CAPTCHA image to 2captcha service...")
+
+            try:
+                # Send CAPTCHA for solving
+                result = solver.normal(captcha_file)
+                captcha_text = result.get('code', '')
+
+                logger.info(f"2captcha solution received: {captcha_text}")
+
+                # Find the input field and submit button
+                input_field = None
+                try:
+                    # Try different potential selectors for the input field
+                    for selector in ["input[name='captcha']", "input[id*='captcha']", "input[type='text']"]:
+                        elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                        if elements:
+                            input_field = elements[0]
+                            break
+                except:
+                    pass
+
+                # If we found an input field, enter the solution
+                if input_field:
+                    input_field.clear()
+                    input_field.send_keys(captcha_text)
+
+                    # Find and click the submit button
+                    submit_button = None
+                    try:
+                        # Try different potential selectors for the submit button
+                        for selector in ["button[type='submit']", "input[type='submit']", "button"]:
+                            elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                            if elements:
+                                submit_button = elements[0]
+                                break
+                    except:
+                        pass
+
+                    if submit_button:
+                        submit_button.click()
+                        time.sleep(3)  # Wait for submission to process
+
+                        # Check if CAPTCHA is still there
+                        return not self.detect_captcha(driver)
+                    else:
+                        logger.warning("Could not find submit button for CAPTCHA")
+                else:
+                    logger.warning("Could not find input field for CAPTCHA")
+
+                return False  # CAPTCHA not solved
+
+            except NetworkException as e:
+                logger.error(f"Network error with 2captcha: {e}")
+                return False
+            except Exception as e:
+                logger.error(f"Error solving image CAPTCHA: {e}")
+                return False
+        except Exception as e:
+            logger.error(f"General error in solve_image_captcha: {e}")
+            return False
+
+    def solve_recaptcha(self, driver):
+        """Solve Google reCAPTCHA using 2captcha"""
+        try:
+            from twocaptcha import TwoCaptcha
+            import time
+
+            # Get your API key - sign up for free trial at 2captcha.com
+            api_key = os.environ.get('CAPTCHA_API_KEY', 'YOUR_2CAPTCHA_API_KEY')
+
+            # Create solver instance
+            solver = TwoCaptcha(api_key)
+
+            # Get site key
+            site_key = None
+            try:
+                # Try to find the site key in the page source
+                recaptcha_div = driver.find_element(By.CSS_SELECTOR, ".g-recaptcha")
+                site_key = recaptcha_div.get_attribute("data-sitekey")
+            except:
+                # Try to extract from page source
+                import re
+                match = re.search(r'data-sitekey=["\']([^"\']+)["\']', driver.page_source)
+                if match:
+                    site_key = match.group(1)
+
+            if not site_key:
+                logger.error("Could not find reCAPTCHA site key")
+                return False
+
+            logger.info(f"Found reCAPTCHA site key: {site_key}")
+
+            # Send CAPTCHA for solving
+            result = solver.recaptcha(
+                sitekey=site_key,
+                url=driver.current_url
+            )
+
+            g_response = result.get('code')
+            logger.info("Received reCAPTCHA solution from 2captcha")
+
+            # Apply the solution
+            driver.execute_script(f"document.getElementById('g-recaptcha-response').innerHTML = '{g_response}';")
+
+            # Submit the form - try to find the submit button
+            try:
+                submit_buttons = driver.find_elements(By.XPATH,
+                                                      "//button[@type='submit'] | //input[@type='submit'] | //button[contains(text(), 'Submit')]")
+                if submit_buttons:
+                    submit_buttons[0].click()
+                else:
+                    # Try to trigger form submission via JavaScript
+                    driver.execute_script("""
+                        var forms = document.getElementsByTagName('form');
+                        if (forms.length > 0) {
+                            forms[0].submit();
+                        }
+                    """)
+            except Exception as e:
+                logger.warning(f"Error submitting reCAPTCHA form: {e}")
+
+            time.sleep(3)  # Wait for submission to process
+
+            # Check if CAPTCHA is still there
+            return not self.detect_captcha(driver)
+
+        except Exception as e:
+            logger.error(f"Error solving reCAPTCHA: {e}")
+            return False
+
+    def solve_hcaptcha(self, driver):
+        """Solve hCaptcha using 2captcha"""
+        try:
+            from twocaptcha import TwoCaptcha
+            import time
+
+            # Get your API key - sign up for free trial at 2captcha.com
+            api_key = os.environ.get('CAPTCHA_API_KEY', 'YOUR_2CAPTCHA_API_KEY')
+
+            # Create solver instance
+            solver = TwoCaptcha(api_key)
+
+            # Get site key
+            site_key = None
+            try:
+                # Try to find the site key in the page source
+                hcaptcha_div = driver.find_element(By.CSS_SELECTOR, ".h-captcha")
+                site_key = hcaptcha_div.get_attribute("data-sitekey")
+            except:
+                # Try to extract from page source
+                import re
+                match = re.search(r'data-sitekey=["\']([^"\']+)["\']', driver.page_source)
+                if match:
+                    site_key = match.group(1)
+
+            if not site_key:
+                logger.error("Could not find hCaptcha site key")
+                return False
+
+            logger.info(f"Found hCaptcha site key: {site_key}")
+
+            # Send CAPTCHA for solving
+            result = solver.hcaptcha(
+                sitekey=site_key,
+                url=driver.current_url
+            )
+
+            h_response = result.get('code')
+            logger.info("Received hCaptcha solution from 2captcha")
+
+            # Apply the solution
+            driver.execute_script(f"document.getElementsByName('h-captcha-response')[0].innerHTML = '{h_response}';")
+
+            # Submit the form - try to find the submit button
+            try:
+                submit_buttons = driver.find_elements(By.XPATH,
+                                                      "//button[@type='submit'] | //input[@type='submit'] | //button[contains(text(), 'Submit')]")
+                if submit_buttons:
+                    submit_buttons[0].click()
+                else:
+                    # Try to trigger form submission via JavaScript
+                    driver.execute_script("""
+                        var forms = document.getElementsByTagName('form');
+                        if (forms.length > 0) {
+                            forms[0].submit();
+                        }
+                    """)
+            except Exception as e:
+                logger.warning(f"Error submitting hCaptcha form: {e}")
+
+            time.sleep(3)  # Wait for submission to process
+
+            # Check if CAPTCHA is still there
+            return not self.detect_captcha(driver)
+
+        except Exception as e:
+            logger.error(f"Error solving hCaptcha: {e}")
+            return False
+
+    def process_request(self, driver, url, category, retry_count=0, max_retries=3):
+        """
+        Complete request pipeline with CAPTCHA and anti-bot protection
+
+        Args:
+            driver: WebDriver instance
+            url: URL to request
+            category: Product category
+            retry_count: Current retry attempt
+            max_retries: Maximum number of retries
+
+        Returns:
+            True if request was successful, False otherwise
+        """
+        if retry_count >= max_retries:
+            logger.error(f"Maximum retries reached for URL: {url}")
+            return False
+
+        try:
+            # 1. Add randomized delay before request
+            delay = random.uniform(2, 8) * (1 + (retry_count * 0.5))  # Increase delay with each retry
+            logger.debug(f"Waiting {delay:.2f}s before requesting {url}")
+            time.sleep(delay)
+
+            # 2. Make the request
+            logger.info(f"Requesting URL: {url}")
+            driver.get(url)
+
+            # 3. Handle CAPTCHA if present
+            if self.detect_captcha(driver):
+                logger.warning(f"CAPTCHA detected on {url}")
+                if not self.handle_captcha(driver):
+                    # CAPTCHA handling failed, try again with new session
+                    logger.warning("CAPTCHA handling failed, resetting session and retrying...")
+                    driver.quit()
+                    new_driver = self.get_driver()
+                    return self.process_request(new_driver, url, category, retry_count + 1, max_retries)
+
+            # 4. Handle age verification if needed
+            self.handle_age_verification(driver)
+
+            # 5. Check if the page loaded correctly
+            try:
+                # Wait for something on the page that indicates successful loading
+                # For search pages:
+                if "search.aspx" in url:
+                    try:
+                        WebDriverWait(driver, 20).until(
+                            EC.presence_of_element_located(
+                                (By.CSS_SELECTOR, ".product-card, a.j-card-link, .catalog-page__content"))
+                        )
+                    except TimeoutException:
+                        logger.warning(f"Timeout waiting for product cards on search page: {url}")
+                        # Verify if it's a no-results page or an actual error
+                        if "По Вашему запросу ничего не найдено" in driver.page_source:
+                            logger.info("Search returned no results")
+                            return True  # No results is still a valid response
+                        return False
+
+                # For product detail pages:
+                elif "detail.aspx" in url:
+                    try:
+                        WebDriverWait(driver, 20).until(
+                            EC.presence_of_element_located((By.CSS_SELECTOR, ".product-page__title, h1.name"))
+                        )
+                    except TimeoutException:
+                        logger.warning(f"Timeout waiting for product title on detail page: {url}")
+                        return False
+            except Exception as e:
+                logger.error(f"Error checking page load: {e}")
+                return False
+
+            # Add some random scrolling to appear more human-like
+            self.simulate_human_behavior(driver)
+
+            return True  # Request successful!
+
+        except Exception as e:
+            logger.error(f"Error in request pipeline: {e}")
+
+            # Check if it's a common error that merits retry
+            if any(s in str(e) for s in ["timeout", "not reachable", "crashed", "session"]):
+                logger.warning(f"Retrying due to connection error ({retry_count + 1}/{max_retries})")
+                # Use a new driver for the retry
+                try:
+                    driver.quit()
+                except:
+                    pass
+
+                time.sleep(5 * (2 ** retry_count))  # Exponential backoff
+                new_driver = self.get_driver()
+                return self.process_request(new_driver, url, category, retry_count + 1, max_retries)
+
+            return False
 
     def handle_rate_limit(self):
         """
@@ -228,77 +728,115 @@ class WildberriesCrawler:
         return proxy
 
     def get_driver(self):
-        from selenium.webdriver.chrome.service import Service
+        import undetected_chromedriver as uc
         import random
         import time
 
-        # Define Chrome options
-        options = webdriver.ChromeOptions()
-        options.add_argument("--headless=new")
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--disable-gpu")
-        options.add_argument("--disable-extensions")
-
-        resolutions = [(1366, 768), (1920, 1080), (1536, 864), (1440, 900)]
-        width, height = random.choice(resolutions)
-        options.add_argument(f"--window-size={width},{height}")
-
-        options.add_argument("--disable-blink-features=AutomationControlled")
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        options.add_experimental_option("useAutomationExtension", False)
-
-        # Важно: добавляем эти опции для избежания проблем с DevTools
-        options.add_argument("--disable-dev-tools")
-        options.add_argument("--remote-debugging-port=9222")
-
-        # Add user agent
-        from fake_useragent import UserAgent
-        ua = UserAgent()
-        user_agent = ua.random
-        options.add_argument(f"user-agent={user_agent}")
-
-        # Получаем прокси, если они доступны
-        proxy = self.get_next_proxy()
-        if proxy:
-            logger.info(f"Используем прокси: {proxy}")
-            options.add_argument(f'--proxy-server={proxy}')
-        else:
-            logger.debug("Прокси не используется (список пуст)")
-
-        # Set specific path to ChromeDriver
-        chromedriver_path = "/usr/local/bin/chromedriver/chromedriver"  # Adjust this to your actual path
-
-        # Try to create driver with explicit service
         try:
-            service = Service(executable_path=chromedriver_path)
-            driver = webdriver.Chrome(service=service, options=options)
+            # Setup undetected-chromedriver options
+            options = uc.ChromeOptions()
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
 
-            # Set timeouts
+            # If headless is needed (note that headless might be detected more easily)
+            # options.add_argument("--headless")
+
+            # Randomize window size
+            resolutions = [(1366, 768), (1920, 1080), (1440, 900), (1536, 864)]
+            width, height = random.choice(resolutions)
+            options.add_argument(f"--window-size={width},{height}")
+
+            # Add language settings to vary fingerprint
+            languages = ["en-US,en;q=0.9", "en-GB,en;q=0.9", "ru-RU,ru;q=0.9", "de-DE,de;q=0.9"]
+            options.add_argument(f"--lang={random.choice(languages)}")
+
+            # Add proxy if available
+            if hasattr(self, 'proxies') and self.proxies:
+                proxy = random.choice(self.proxies)
+                options.add_argument(f'--proxy-server={proxy}')
+
+            # Create the undetected-chromedriver
+            driver = uc.Chrome(options=options)
+
+            # Set timeouts (these might be handled differently in undetected_chromedriver)
             driver.set_page_load_timeout(30)
             driver.set_script_timeout(30)
-
-            # Clear cookies
-            driver.delete_all_cookies()
 
             # Test if driver works
             driver.get("about:blank")
 
-            # Добавляем в список активных
-            self.active_drivers.append(driver)
-
+            logger.info("Successfully created undetected-chromedriver instance")
             return driver
+
         except Exception as e:
-            logger.error(f"Ошибка при создании драйвера: {e}")
-            # Wait and retry
+            logger.error(f"Error creating undetected-chromedriver: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+            # Fallback to regular Chrome if undetected fails
             time.sleep(3)
             try:
-                # Try simpler initialization
+                logger.warning("Falling back to regular ChromeDriver")
+                from selenium.webdriver.chrome.service import Service
+
+                # Define Chrome options
+                options = webdriver.ChromeOptions()
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+                options.add_argument("--disable-gpu")
+                options.add_argument("--disable-extensions")
+
+                # Anti-bot detection measures
+                options.add_argument("--disable-blink-features=AutomationControlled")
+                options.add_experimental_option("excludeSwitches", ["enable-automation"])
+                options.add_experimental_option("useAutomationExtension", False)
+
+                # Randomize window size
+                width, height = random.choice(resolutions)
+                options.add_argument(f"--window-size={width},{height}")
+
+                # Add user agent
+                from fake_useragent import UserAgent
+                ua = UserAgent()
+                user_agent = ua.random
+                options.add_argument(f"user-agent={user_agent}")
+
+                # Add proxy if available
+                if hasattr(self, 'proxies') and self.proxies:
+                    proxy = random.choice(self.proxies)
+                    options.add_argument(f'--proxy-server={proxy}')
+
+                # Try standard chromedriver
                 driver = webdriver.Chrome(options=options)
-                self.active_drivers.append(driver)
+
+                # Add stealth JS
+                driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                    "source": """
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+                    window.chrome = {
+                        runtime: {}
+                    };
+                    """
+                })
+
+                # Set timeouts
+                driver.set_page_load_timeout(30)
+                driver.set_script_timeout(30)
+
+                # Clear cookies
+                driver.delete_all_cookies()
+
+                # Test if driver works
+                driver.get("about:blank")
+
                 return driver
             except Exception as e2:
-                logger.error(f"Повторная ошибка: {e2}")
+                logger.error(f"Fallback also failed: {e2}")
                 raise
 
     def handle_age_verification(self, driver):
@@ -737,19 +1275,18 @@ class WildberriesCrawler:
     def process_product_page(self, driver, url, category):
         try:
             logger.info(f"Обработка карточки товара: {url}")
-            driver.get(url)
-            time.sleep(random.uniform(1, 4))
-            self.handle_age_verification(driver)
 
-            # Initialize these variables early to avoid reference errors
-            # if the detail popup section fails
-            description = ""
-            characteristics = {}
+            # Use our new process_request method instead of direct driver.get()
+            if not self.process_request(driver, url, category):
+                logger.error(f"Failed to load product page: {url}")
+                return None
 
+            # Continue with existing product extraction code
             # Ждем загрузку основной информации о товаре
             WebDriverWait(driver, 20).until(
                 EC.visibility_of_element_located((By.CLASS_NAME, "product-page__title"))
             )
+
             try:
                 WebDriverWait(driver, 15).until(
                     EC.presence_of_all_elements_located((By.CSS_SELECTOR, "ul.breadcrumbs__list li.breadcrumbs__item"))
@@ -757,14 +1294,14 @@ class WildberriesCrawler:
             except TimeoutException:
                 logger.warning(f"Timeout waiting for breadcrumbs on {url}")
 
-            # Извлекаем базовую информацию: название, бренд, навигацию и начальные изображения
+            # Rest of your existing extraction code...
             main_soup = BeautifulSoup(driver.page_source, 'html.parser')
 
-            # Название товара
+            # Product name
             name_element = main_soup.select_one("h1.product-page__title")
             name = name_element.text.strip() if name_element else ""
 
-            # Бренд товара
+            # Brand
             brand_element = main_soup.select_one("a.product-page__header-brand")
             brand = brand_element.text.strip() if brand_element else ""
 
@@ -991,11 +1528,12 @@ class WildberriesCrawler:
         retry_count = 0
         max_consecutive_failures = 3
         consecutive_failures = 0
-        max_pages_per_term = 50  # НОВОЕ: Максимум страниц для каждого поискового запроса
+        max_pages_per_term = 50
         collected_articles_for_category = set()
         base_delay = 5
         error_count = 0
 
+        # Circuit breaker pattern to prevent hammering the site after multiple failures
         circuit_breaker = {
             "failures": 0,
             "threshold": 5,
@@ -1006,12 +1544,13 @@ class WildberriesCrawler:
         circuit_open_time = None
         success = False
 
-        # Альтернативные поисковые запросы
+        # Alternative search terms
         alternative_search_terms = self.get_alternative_search_terms(category)
         current_search_idx = 0
         current_search_term = category
 
         while len(urls) < target_count:
+            # Check circuit breaker
             if circuit_breaker["is_open"]:
                 current_time = time.time()
                 if circuit_open_time and (current_time - circuit_open_time > circuit_breaker["reset_after"]):
@@ -1024,18 +1563,19 @@ class WildberriesCrawler:
                     time.sleep(30)  # Wait before checking again
                     continue
 
+            # Adaptive delay based on failure rate
             if consecutive_failures > 0:
                 delay = base_delay * (1.5 ** consecutive_failures)
                 logger.info(f"Increasing delay to {delay:.2f}s due to failures")
                 time.sleep(delay)
 
-            # НОВОЕ: Проверяем лимит страниц для текущего поискового запроса
+            # Check page limit for current search term
             if page > max_pages_per_term:
                 logger.warning(f"Достигнут предел страниц ({max_pages_per_term}) для '{current_search_term}'")
                 if current_search_idx < len(alternative_search_terms) - 1:
                     current_search_idx += 1
                     current_search_term = alternative_search_terms[current_search_idx]
-                    page = 1  # Сбрасываем счетчик страниц
+                    page = 1
                     consecutive_failures = 0
                     logger.info(f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
                     continue
@@ -1044,23 +1584,55 @@ class WildberriesCrawler:
                     break
 
             try:
-                # Создаем новый драйвер для каждой страницы
+                # Create new driver for each page
                 driver = self.get_driver()
 
                 try:
                     search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={current_search_term}&page={page}"
                     logger.info(f"Загрузка страницы {page} для поискового запроса '{current_search_term}'")
 
-                    driver.get(search_url)
-                    time.sleep(random.uniform(3, 7))
+                    # Use process_request instead of direct driver.get
+                    request_successful = self.process_request(driver, search_url, category)
 
-                    self.handle_age_verification(driver)
-                    self.simulate_human_behavior(driver)
+                    if not request_successful:
+                        consecutive_failures += 1
+                        logger.warning(
+                            f"Не удалось загрузить страницу {page} (попытка {consecutive_failures}/{max_consecutive_failures})")
+                        if consecutive_failures >= max_consecutive_failures:
+                            if self.try_switch_to_next_search_term(alternative_search_terms, current_search_idx):
+                                current_search_idx += 1
+                                current_search_term = alternative_search_terms[current_search_idx]
+                                page = 1
+                                consecutive_failures = 0
+                                logger.info(
+                                    f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                            else:
+                                logger.error(f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
+                                break
+                        continue
+
+                    # No need for additional age verification or human behavior simulation
+                    # as process_request handles that
 
                     if not self.wait_for_products_load(driver):
                         consecutive_failures += 1
                         logger.warning(
                             f"Не удалось загрузить товары на странице {page} (попытка {consecutive_failures}/{max_consecutive_failures})")
+
+                        # Check if this is a CAPTCHA page
+                        if self.detect_captcha(driver):
+                            logger.warning("Обнаружена CAPTCHA на странице поиска товаров")
+                            if not self.handle_captcha(driver):
+                                logger.error("Не удалось обработать CAPTCHA, переключаемся на другой запрос")
+                                if self.try_switch_to_next_search_term(alternative_search_terms, current_search_idx):
+                                    current_search_idx += 1
+                                    current_search_term = alternative_search_terms[current_search_idx]
+                                    page = 1
+                                    consecutive_failures = 0
+                                    logger.info(
+                                        f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                                    continue
+
                         if consecutive_failures >= max_consecutive_failures:
                             if self.try_switch_to_next_search_term(alternative_search_terms, current_search_idx):
                                 current_search_idx += 1
@@ -1075,7 +1647,9 @@ class WildberriesCrawler:
                         continue
 
                     consecutive_failures = 0
+                    success = True
 
+                    # Human-like scrolling
                     self.smooth_scroll(driver, scroll_pause_time=random.uniform(0.7, 1.5),
                                        scroll_increment=random.randint(40, 60))
 
@@ -1086,36 +1660,36 @@ class WildberriesCrawler:
                         logger.warning(f"Не найдены ссылки на товары на странице {page}. Пробуем другой селектор.")
                         product_links = soup.select("a.product-card__main.j-card-link")
 
-                        # Пробуем третий селектор, который иногда работает на Wildberries
                         if not product_links:
                             product_links = soup.select("a[href*='/catalog/'][href*='/detail.aspx']")
 
-                        if not product_links:
-                            logger.warning(f"Не найдены ссылки на товары через все селекторы на странице {page}")
-                            consecutive_failures += 1
+                            if not product_links:
+                                logger.warning(f"Не найдены ссылки на товары через все селекторы на странице {page}")
+                                consecutive_failures += 1
 
-                            if consecutive_failures >= max_consecutive_failures:
-                                logger.warning(
-                                    f"Достигнуто максимальное число неудачных попыток подряд. Пробуем другой запрос.")
-                                if self.try_switch_to_next_search_term(alternative_search_terms, current_search_idx):
-                                    current_search_idx += 1
-                                    current_search_term = alternative_search_terms[current_search_idx]
-                                    page = 1
-                                    consecutive_failures = 0
-                                    logger.info(
-                                        f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
-                                    continue
-                                else:
-                                    logger.error(
-                                        f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
-                                    break
+                                if consecutive_failures >= max_consecutive_failures:
+                                    logger.warning(
+                                        f"Достигнуто максимальное число неудачных попыток подряд. Пробуем другой запрос.")
+                                    if self.try_switch_to_next_search_term(alternative_search_terms,
+                                                                           current_search_idx):
+                                        current_search_idx += 1
+                                        current_search_term = alternative_search_terms[current_search_idx]
+                                        page = 1
+                                        consecutive_failures = 0
+                                        logger.info(
+                                            f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                                        continue
+                                    else:
+                                        logger.error(
+                                            f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
+                                        break
 
-                            retry_count += 1
-                            if retry_count >= max_retries:
-                                logger.error(f"Достигнут лимит попыток для страницы {page}. Переходим к следующей.")
-                                page += 1
-                                retry_count = 0
-                            continue
+                                retry_count += 1
+                                if retry_count >= max_retries:
+                                    logger.error(f"Достигнут лимит попыток для страницы {page}. Переходим к следующей.")
+                                    page += 1
+                                    retry_count = 0
+                                continue
 
                     retry_count = 0
 
@@ -1167,20 +1741,31 @@ class WildberriesCrawler:
                         consecutive_failures = 0
                         success = True
 
-                    if not success:  # Define a success indicator in your code
+                    # Circuit breaker update
+                    if not success:
                         circuit_breaker["failures"] += 1
                         if circuit_breaker["failures"] >= circuit_breaker["threshold"]:
                             circuit_breaker["is_open"] = True
                             circuit_open_time = time.time()
                             logger.warning("Circuit breaker opened due to repeated failures")
 
-                            # Potentially switch search term or proxy here
+                            # Switch search term when circuit breaker opens
                             if current_search_idx < len(alternative_search_terms) - 1:
                                 current_search_idx += 1
                                 current_search_term = alternative_search_terms[current_search_idx]
+                    else:
+                        # Reset failures on success
+                        circuit_breaker["failures"] = max(0, circuit_breaker["failures"] - 1)
 
                     page += 1
-                    time.sleep(random.uniform(2, 5))  # Случайная задержка между страницами
+
+                    # Human-like random page skipping
+                    if random.random() < 0.2:  # 20% chance to skip pages
+                        skip_pages = random.randint(1, 3)
+                        page += skip_pages
+                        logger.info(f"Randomly skipping {skip_pages} pages to appear more human-like")
+
+                    time.sleep(random.uniform(2, 5))  # Random delay between pages
 
                 finally:
                     driver.quit()
@@ -1191,9 +1776,25 @@ class WildberriesCrawler:
                 import traceback
                 logger.error(traceback.format_exc())
                 consecutive_failures += 1
-                time.sleep(5)  # Пауза после ошибки
+
+                # Check if exception looks like a CAPTCHA or bot detection issue
+                if any(term in str(e).lower() for term in ["captcha", "challenge", "robot", "автоматизированными"]):
+                    logger.warning("Detected possible anti-bot challenge in exception. Cooling down...")
+                    time.sleep(random.uniform(60, 120))  # Longer cooldown for suspected blocking
+
+                    # Try switching search terms on suspected blocking
+                    if current_search_idx < len(alternative_search_terms) - 1:
+                        current_search_idx += 1
+                        current_search_term = alternative_search_terms[current_search_idx]
+                        page = 1
+                        consecutive_failures = 0
+                        logger.info(f"Suspected blocking, switching to: '{current_search_term}'")
+                else:
+                    time.sleep(5)  # Regular pause after other errors
 
         return urls[:target_count]
+
+
 
     def try_switch_to_next_search_term(self, alternative_terms: List[str], current_idx: int) -> bool:
         """Проверяет, можно ли переключиться на следующий поисковый термин"""
