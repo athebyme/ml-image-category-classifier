@@ -721,9 +721,9 @@ class WildberriesCrawler:
             options.add_argument(f"--lang={random.choice(languages)}")
 
             # Add proxy if available
-            if hasattr(self, 'proxies') and self.proxies:
-                proxy = random.choice(self.proxies)
-                options.add_argument(f'--proxy-server={proxy}')
+            # if hasattr(self, 'proxies') and self.proxies:
+            #     proxy = random.choice(self.proxies)
+            #     options.add_argument(f'--proxy-server={proxy}')
 
             # Create the undetected-chromedriver
             driver = uc.Chrome(options=options)
@@ -772,9 +772,9 @@ class WildberriesCrawler:
                 options.add_argument(f"user-agent={user_agent}")
 
                 # Add proxy if available
-                if hasattr(self, 'proxies') and self.proxies:
-                    proxy = random.choice(self.proxies)
-                    options.add_argument(f'--proxy-server={proxy}')
+                # if hasattr(self, 'proxies') and self.proxies:
+                #     proxy = random.choice(self.proxies)
+                #     options.add_argument(f'--proxy-server={proxy}')
 
                 # Try standard chromedriver
                 driver = webdriver.Chrome(options=options)
@@ -1450,7 +1450,7 @@ class WildberriesCrawler:
     def wait_for_products_load(self, driver):
         try:
             # First ensure the page itself is fully loaded
-            WebDriverWait(driver, 15).until(
+            WebDriverWait(driver, 30).until(
                 lambda d: d.execute_script('return document.readyState') == 'complete'
             )
 
