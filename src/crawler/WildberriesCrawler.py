@@ -72,7 +72,7 @@ class WildberriesCrawler:
     def __init__(self, category_targets: Dict[str, int], max_workers: int = 8):
         self.category_targets = category_targets
         self.max_workers = max_workers
-        self.output_dir = "./output"
+        self.output_dir = "/home/athebyme/shared_crawler_output"
         self.products_queue = Queue()
         self.session_count = 0
         self.max_requests_per_session = random.randint(15, 25)  # Randomize session length
