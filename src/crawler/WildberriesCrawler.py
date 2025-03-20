@@ -438,7 +438,7 @@ class WildberriesCrawler:
             import time
 
             # Get your API key - sign up for free trial at 2captcha.com
-            api_key = os.environ.get('CAPTCHA_API_KEY', 'YOUR_2CAPTCHA_API_KEY')
+            api_key = os.environ.get('CAPTCHA_API_KEY', '')
 
             # Create solver instance
             solver = TwoCaptcha(api_key)
@@ -696,36 +696,6 @@ class WildberriesCrawler:
 
         # Корректно завершаем работу программы
         sys.exit(0)
-
-    def load_proxies(self):
-        """
-        Загружает список прокси из файла или возвращает пустой список,
-        если файл не найден или пуст
-        """
-        try:
-            proxy_file = "proxies.txt"  # Путь к файлу с прокси
-            if os.path.exists(proxy_file):
-                with open(proxy_file, "r", encoding="utf-8") as f:
-                    proxies = [line.strip() for line in f if line.strip()]
-                logger.info(f"Загружено {len(proxies)} прокси из файла {proxy_file}")
-                return proxies
-            else:
-                logger.warning(f"Файл с прокси {proxy_file} не найден")
-                return []
-        except Exception as e:
-            logger.error(f"Ошибка при загрузке прокси: {e}")
-            return []
-
-    def get_next_proxy(self):
-        """
-        Возвращает следующий прокси из списка или None, если список пуст
-        """
-        if not self.proxies:
-            return None
-
-        proxy = self.proxies[self.proxy_index]
-        self.proxy_index = (self.proxy_index + 1) % len(self.proxies)
-        return proxy
 
     def get_driver(self):
         import undetected_chromedriver as uc
@@ -1863,8 +1833,18 @@ class WildberriesCrawler:
         else:
             logger.warning("Данные товара или номер статьи отсутствуют. Сохранение пропущено.")
 
+
+
     def run(self):
         logger.info("Запуск краулера Wildberries...")
+
+        if not self.proxies:
+            logger.info("No proxies found in proxies.txt. Searching for free proxies...")
+            self.proxies = self.find_free_proxies(count=20)
+
+            if self.proxies:
+                # Test the found proxies
+                self.test_proxies()
 
         if not display.is_alive():
             display.start()
@@ -1995,6 +1975,187 @@ class WildberriesCrawler:
 
         return unique_results
 
+    def create_empty_proxies_file(self):
+        """Creates an empty proxies file if it doesn't exist"""
+        try:
+            proxies_file = "proxies.txt"  # File in the same directory as the script
+            if not os.path.exists(proxies_file):
+                with open(proxies_file, 'w') as f:
+                    f.write("# Add your proxies here, one per line\n")
+                    f.write("# Format: protocol://username:password@host:port\n")
+                    f.write("# Example: http://user:pass@proxy.example.com:8080\n")
+                logger.info(f"Created empty proxies file at {proxies_file}")
+            else:
+                logger.info(f"Proxies file already exists at {proxies_file}")
+        except Exception as e:
+            logger.error(f"Error creating proxies file: {e}")
+
+    def load_proxies(self):
+        """Loads proxies from the proxies.txt file"""
+        proxies = []
+        proxies_file = "proxies.txt"
+
+        if os.path.exists(proxies_file):
+            try:
+                with open(proxies_file, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            proxies.append(line)
+                logger.info(f"Loaded {len(proxies)} proxies from {proxies_file}")
+            except Exception as e:
+                logger.error(f"Error loading proxies: {e}")
+        else:
+            logger.warning(f"Proxies file {proxies_file} not found. Creating empty file.")
+            self.create_empty_proxies_file()
+
+        return proxies
+
+    def find_free_proxies(self, count=10):
+        """
+        Find free proxies from public sources
+
+        Args:
+            count: Maximum number of proxies to find
+
+        Returns:
+            List of proxy strings in format protocol://host:port
+        """
+        import requests
+        from bs4 import BeautifulSoup
+
+        found_proxies = []
+        logger.info("Searching for free proxies...")
+
+        # Try multiple free proxy sources
+        try:
+            # Source 1: https://free-proxy-list.net/
+            response = requests.get('https://free-proxy-list.net/', timeout=15)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            table = soup.find('table', attrs={'class': 'table table-striped table-bordered'})
+
+            if table:
+                for row in table.find_all('tr')[1:]:  # Skip header row
+                    columns = row.find_all('td')
+                    if len(columns) >= 7:
+                        ip = columns[0].text.strip()
+                        port = columns[1].text.strip()
+                        https = columns[6].text.strip() == 'yes'
+                        protocol = 'https' if https else 'http'
+
+                        proxy = f"{protocol}://{ip}:{port}"
+                        found_proxies.append(proxy)
+
+                        if len(found_proxies) >= count:
+                            break
+
+            logger.info(f"Found {len(found_proxies)} free proxies")
+        except Exception as e:
+            logger.error(f"Error finding free proxies: {e}")
+
+        # Save found proxies to file
+        if found_proxies:
+            try:
+                with open("proxies.txt", 'w') as f:
+                    f.write("# Automatically found free proxies\n")
+                    f.write("# Format: protocol://host:port\n")
+                    f.write("# Note: Free proxies may be unreliable\n\n")
+
+                    for proxy in found_proxies:
+                        f.write(f"{proxy}\n")
+
+                logger.info(f"Saved {len(found_proxies)} proxies to proxies.txt")
+            except Exception as e:
+                logger.error(f"Error saving proxies to file: {e}")
+
+        return found_proxies
+
+    def test_proxies(self, max_to_test=10, timeout=5):
+        """
+        Test proxies to find working ones
+
+        Args:
+            max_to_test: Maximum number of proxies to test
+            timeout: Connection timeout in seconds
+
+        Returns:
+            List of working proxies
+        """
+        import requests
+        import concurrent.futures
+
+        logger.info(f"Testing {min(len(self.proxies), max_to_test)} proxies...")
+        working_proxies = []
+
+        def test_proxy(proxy):
+            try:
+                response = requests.get(
+                    'https://www.google.com',
+                    proxies={'http': proxy, 'https': proxy},
+                    timeout=timeout
+                )
+                if response.status_code == 200:
+                    logger.info(f"Proxy works: {proxy}")
+                    return proxy
+            except:
+                pass
+            return None
+
+        # Test proxies in parallel
+        proxies_to_test = self.proxies[:max_to_test]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, len(proxies_to_test))) as executor:
+            futures = {executor.submit(test_proxy, proxy): proxy for proxy in proxies_to_test}
+            for future in concurrent.futures.as_completed(futures):
+                result = future.result()
+                if result:
+                    working_proxies.append(result)
+
+        logger.info(f"Found {len(working_proxies)} working proxies out of {len(proxies_to_test)} tested")
+
+        # Save working proxies to a separate file
+        if working_proxies:
+            try:
+                with open("working_proxies.txt", 'w') as f:
+                    f.write("# Tested working proxies\n")
+                    for proxy in working_proxies:
+                        f.write(f"{proxy}\n")
+            except Exception as e:
+                logger.error(f"Error saving working proxies: {e}")
+
+        # Update the class proxies list
+        self.proxies = working_proxies
+        return working_proxies
+
+    def get_next_proxy(self):
+        """
+        Get the next proxy from the rotation
+        Returns: A proxy URL or None if no proxies available
+        """
+        if not self.proxies:
+            return None
+
+        # Simple round-robin proxy selection
+        proxy = self.proxies.pop(0)
+        self.proxies.append(proxy)  # Put it back at the end
+
+        return proxy
+
+    def use_new_proxy(self, driver):
+        """
+        Close the current driver and create a new one with a different proxy
+        Returns: New WebDriver instance
+        """
+        try:
+            driver.quit()
+        except:
+            pass
+
+        # Get a different proxy
+        proxy = self.get_next_proxy()
+        logger.info(f"Switching to new proxy: {proxy}")
+
+        # Create a new driver with this proxy
+        return self.get_driver()
 
 if __name__ == "__main__":
     category_targets_needed = {
@@ -2136,3 +2297,4 @@ if __name__ == "__main__":
         crawler.create_empty_proxies_file()
 
     crawler.run()
+
