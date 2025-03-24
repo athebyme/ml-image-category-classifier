@@ -6,6 +6,6 @@
 - Управления сохраненными товарами
 """
 
-from ..storage.json_storage import JsonStorage
+from .json_storage import JsonStorage
 
 __all__ = ['JsonStorage']

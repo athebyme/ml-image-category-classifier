@@ -1,12 +1,9 @@
 """
 Модуль для обнаружения и решения CAPTCHA.
 """
-import os
 import time
 import requests
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 from ..logging_setup import logger
 from ..config import CAPTCHA_API_KEY
 

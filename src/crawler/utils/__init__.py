@@ -8,10 +8,10 @@
 - Реализации экспоненциальной задержки
 """
 
-from ..utils.browser import BrowserManager
-from ..utils.proxy_manager import ProxyManager
-from ..utils.captcha_resolver import CaptchaSolver
-from ..utils.backoff import ExponentialBackoff
+from .browser import BrowserManager
+from .proxy_manager import ProxyManager
+from .captcha_resolver import CaptchaSolver
+from .backoff import ExponentialBackoff
 
 __all__ = [
     'BrowserManager',

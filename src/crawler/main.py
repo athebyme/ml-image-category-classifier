@@ -9,10 +9,10 @@ import os
 import json
 import time
 import argparse
-from logging_setup import logger
-from src.crawler.ozon_crawler import OzonCrawler
-from wildberries_crawler import WildberriesCrawler
-from storage.json_storage import JsonStorage
+from .logging_setup import logger
+from .ozon_crawler import OzonCrawler
+from .wildberries_crawler import WildberriesCrawler
+from .storage.json_storage import JsonStorage
 
 
 def parse_arguments():
@@ -35,6 +35,9 @@ def parse_arguments():
 
     parser.add_argument('--scale-factor', type=float, default=1.0,
                         help='Коэффициент масштабирования для целевых значений категорий (по умолчанию: 1.0)')
+
+    parser.add_argument('--source', type=str, default="",
+                        help='Тип площадки, откуда собирается информация')
 
     return parser.parse_args()
 

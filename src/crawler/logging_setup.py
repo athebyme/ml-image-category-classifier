@@ -1,7 +1,6 @@
 """
 Модуль настройки логирования для краулера Wildberries.
 """
-import os
 from loguru import logger
 from pyvirtualdisplay import Display
 

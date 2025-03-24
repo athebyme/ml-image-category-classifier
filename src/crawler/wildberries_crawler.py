@@ -1,7 +1,6 @@
 """
 Главный модуль краулера Wildberries.
 """
-import os
 import time
 import random
 import signal
