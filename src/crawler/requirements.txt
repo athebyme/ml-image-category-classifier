@@ -1,0 +1,8 @@
+selenium>=4.1.0
+beautifulsoup4>=4.10.0
+requests>=2.27.1
+loguru>=0.6.0
+undetected-chromedriver>=3.1.5
+fake-useragent>=0.1.11
+pyvirtualdisplay>=3.0
+twocaptcha>=0.0.1
