@@ -10,12 +10,12 @@
 
 from .browser import BrowserManager
 from .proxy_manager import ProxyManager
-from .captcha_resolver import CaptchaSolver
+from .simple_captcha_resolver import SimpleCaptchaSolver
 from .backoff import ExponentialBackoff
 
 __all__ = [
     'BrowserManager',
     'ProxyManager',
-    'CaptchaSolver',
+    'SimpleCaptchaSolver',
     'ExponentialBackoff'
 ]

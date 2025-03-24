@@ -51,7 +51,7 @@ crawler/
 
 1. Клонируйте репозиторий:
    ```bash
-   git clone https://github.com/username/crawler.git
+   git clone https://github.com/athebyme/crawler.git
    cd crawler
    ```
 

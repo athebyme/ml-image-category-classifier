@@ -10,9 +10,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import Queue, Empty
 
 from .logging_setup import logger, setup_virtual_display
+from .utils import SimpleCaptchaSolver
 from .utils.browser import BrowserManager
 from .utils.proxy_manager import ProxyManager
-from .utils.captcha_resolver import CaptchaSolver
 from .utils.backoff import ExponentialBackoff
 from .parsers.ozon_product_parser import OzonProductParser
 from .parsers.ozon_search_parser import OzonSearchParser
@@ -46,7 +46,7 @@ class OzonCrawler:
         # Инициализация компонентов
         self.proxy_manager = ProxyManager()
         self.browser_manager = BrowserManager(self.proxy_manager)
-        self.captcha_solver = CaptchaSolver()
+        self.captcha_solver = SimpleCaptchaSolver()
         self.product_parser = OzonProductParser(self.browser_manager, self.captcha_solver)
         self.storage = JsonStorage(output_dir)
         self.search_parser = OzonSearchParser(self.browser_manager, self.captcha_solver)

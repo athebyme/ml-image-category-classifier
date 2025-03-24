@@ -48,57 +48,73 @@ class BrowserManager:
 
     def _get_undetected_driver(self, use_proxy=False):
         """
-        Создает экземпляр undetected_chromedriver для обхода обнаружения.
+        Creates an undetected_chromedriver instance to bypass detection.
 
         Args:
-            use_proxy (bool): Использовать ли прокси.
+            use_proxy (bool): Whether to use a proxy.
 
         Returns:
-            WebDriver: Экземпляр undetected_chromedriver.
+            WebDriver: An undetected_chromedriver instance.
         """
         try:
-            import undetected_chromedriver as uc
+            # First check if setuptools is installed (required for distutils)
+            try:
+                import setuptools
+            except ImportError:
+                logger.warning("setuptools not installed, which is required for undetected_chromedriver")
+                logger.warning("Install setuptools: pip install setuptools")
+                return self._get_standard_driver(use_proxy)
 
-            # Настройка опций undetected-chromedriver
+            # Now try to import undetected_chromedriver
+            try:
+                import undetected_chromedriver as uc
+            except ImportError as e:
+                if "No module named 'distutils'" in str(e):
+                    logger.error("Missing distutils module which is required by undetected_chromedriver")
+                    logger.warning("Install setuptools: pip install setuptools")
+                else:
+                    logger.error(f"Error importing undetected_chromedriver: {e}")
+
+                logger.warning("Falling back to standard Chrome WebDriver")
+                return self._get_standard_driver(use_proxy)
+
+            # Setup undetected-chromedriver options
             options = uc.ChromeOptions()
             options.add_argument("--no-sandbox")
             options.add_argument("--disable-dev-shm-usage")
 
-            # Если требуется headless режим (может легче обнаруживаться)
-            # options.add_argument("--headless")
-
-            # Рандомизация размера окна
+            # Randomize window size
             width, height = random.choice(SCREEN_RESOLUTIONS)
             options.add_argument(f"--window-size={width},{height}")
 
-            # Рандомизация языка
+            # Randomize language
             options.add_argument(f"--lang={random.choice(LANGUAGES)}")
 
-            # Добавляем прокси при необходимости
+            # Add proxy if needed
             if use_proxy and self.proxy_manager:
                 proxy = self.proxy_manager.get_next_proxy()
                 if proxy:
                     options.add_argument(f'--proxy-server={proxy}')
 
-            # Создаем экземпляр undetected-chromedriver
+            # Create undetected-chromedriver instance
             driver = uc.Chrome(options=options)
 
-            # Устанавливаем таймауты
+            # Set timeouts
             driver.set_page_load_timeout(30)
             driver.set_script_timeout(30)
 
-            # Проверяем, работает ли драйвер
+            # Test if driver works
             driver.get("about:blank")
 
-            logger.info("Успешно создан экземпляр undetected-chromedriver")
+            logger.info("Successfully created undetected-chromedriver instance")
             self.active_drivers.append(driver)
             return driver
 
         except Exception as e:
-            logger.error(f"Ошибка при создании undetected-chromedriver: {e}")
+            logger.error(f"Error creating undetected-chromedriver: {e}")
             logger.error(traceback.format_exc())
 
-            # Если не получилось создать undetected-chromedriver, используем обычный Chrome
+            # If undetected-chromedriver fails, use standard Chrome
             time.sleep(3)
             return self._get_standard_driver(use_proxy)
 
