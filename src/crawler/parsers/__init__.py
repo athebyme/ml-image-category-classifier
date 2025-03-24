@@ -1,12 +1,19 @@
 """
-Пакет парсеров для краулера Wildberries.
+Пакет парсеров для краулера.
 
 Включает в себя классы для парсинга:
-- Страниц товаров
+- Страниц товаров Wildberries и Ozon
 - Страниц поиска и категорий
 """
 
-from crawler.parsers.product_parser import ProductParser
-from crawler.parsers.search_parser import SearchParser
+from .wildberries_product_parser import WildberriesProductParser
+from .wildberries_search_parser import WildberriesSearchParser
+from .ozon_product_parser import OzonProductParser
+from .ozon_search_parser import OzonSearchParser
 
-__all__ = ['ProductParser', 'SearchParser']
+__all__ = [
+    'WildberriesProductParser',
+    'WildberriesSearchParser',
+    'OzonProductParser',
+    'OzonSearchParser'
+]

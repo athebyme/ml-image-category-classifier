@@ -1,7 +1,5 @@
-# Wildberries Crawler
-
-Модульный и масштабируемый краулер для сбора данных о товарах с сайта Wildberries.
-
+# Crawler для Wildberries и Ozon
+Модульный и масштабируемый краулер для сбора данных о товарах с сайтов Wildberries и Ozon.
 ## Особенности
 
 - Модульная архитектура с разделением ответственности
@@ -144,8 +142,8 @@ print(f"Найдено {len(product_urls)} URL-адресов товаров")
 ### Использование ProductParser для обработки одного товара:
 
 ```python
-from crawler.utils.browser import BrowserManager
-from crawler.parsers.product_parser import ProductParser
+from utils.browser import BrowserManager
+from parsers.product_parser import ProductParser
 
 browser_manager = BrowserManager()
 product_parser = ProductParser(browser_manager)

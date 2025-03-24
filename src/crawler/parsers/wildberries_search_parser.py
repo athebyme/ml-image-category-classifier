@@ -9,11 +9,12 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
+
 from ..logging_setup import logger
-from ..config import BASE_SEARCH_URL, MAX_CONSECUTIVE_FAILURES, MAX_PAGES_PER_TERM
+from ..config import MAX_CONSECUTIVE_FAILURES, MAX_PAGES_PER_TERM
 
 
-class SearchParser:
+class WildberriesSearchParser:
     """
     Класс для парсинга страниц поиска Wildberries и сбора ссылок на товары.
     """
@@ -123,8 +124,7 @@ class SearchParser:
             "Лубриканты": ["Смазка интимная", "Гель-смазка", "Лубрикант", "Интимная смазка"],
             "Зажимы для сосков": ["Зажимы на соски", "Прищепки для сосков", "Зажимы на грудь", "Nipple clamps"],
             "Анальные шарики": ["Анальные бусы", "Анальная цепочка", "Анальные шары", "Anal beads"],
-            "Анальные бусы": ["Анальные шарики", "Анальная цепочка с шариками", "Гирлянда анальная",
-                              "Бусы для анального секса"]
+            "Анальные бусы": ["Анальные шарики", "Анальная цепочка с шариками", "Гирлянда анальная", "Бусы для анального секса"]
         }
 
         # Если для категории есть предопределенные альтернативы, используем их
@@ -244,24 +244,23 @@ class SearchParser:
             # Check circuit breaker
             if self.circuit_breaker["is_open"]:
                 current_time = time.time()
-                if self.circuit_open_time and (
-                        current_time - self.circuit_open_time > self.circuit_breaker["reset_after"]):
+                if self.circuit_open_time and (current_time - self.circuit_open_time > self.circuit_breaker["reset_after"]):
                     # Reset circuit breaker
                     self.circuit_breaker["is_open"] = False
                     self.circuit_breaker["failures"] = 0
-                    logger.info("Автоматический выключатель сброшен после периода охлаждения")
+                    logger.info("Circuit breaker reset after cooling period")
                 else:
-                    logger.warning("Автоматический выключатель открыт, приостановка запросов")
-                    time.sleep(30)  # Ждем, прежде чем проверить снова
+                    logger.warning("Circuit breaker open, pausing requests")
+                    time.sleep(30)  # Wait before checking again
                     continue
 
-            # Адаптивная задержка в зависимости от частоты сбоев
+            # Adaptive delay based on failure rate
             if consecutive_failures > 0:
                 delay = base_delay * (1.5 ** consecutive_failures)
-                logger.info(f"Увеличение задержки до {delay:.2f}с из-за сбоев")
+                logger.info(f"Increasing delay to {delay:.2f}s due to failures")
                 time.sleep(delay)
 
-            # Проверка лимита страниц для текущего поискового запроса
+            # Check page limit for current search term
             if page > MAX_PAGES_PER_TERM:
                 logger.warning(f"Достигнут предел страниц ({MAX_PAGES_PER_TERM}) для '{current_search_term}'")
                 if current_search_idx < len(alternative_search_terms) - 1:
@@ -280,7 +279,7 @@ class SearchParser:
                 driver = self.browser_manager.get_driver()
 
                 try:
-                    search_url = BASE_SEARCH_URL.format(current_search_term, page)
+                    search_url = f"https://www.wildberries.ru/catalog/0/search.aspx?search={current_search_term}&page={page}"
                     logger.info(f"Загрузка страницы {page} для поискового запроса '{current_search_term}'")
 
                     driver.get(search_url)
@@ -300,11 +299,9 @@ class SearchParser:
                                     current_search_term = alternative_search_terms[current_search_idx]
                                     page = 1
                                     consecutive_failures = 0
-                                    logger.info(
-                                        f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                                    logger.info(f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
                                 else:
-                                    logger.error(
-                                        f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
+                                    logger.error(f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
                                     break
                             continue
 
@@ -329,8 +326,7 @@ class SearchParser:
                                     current_search_term = alternative_search_terms[current_search_idx]
                                     page = 1
                                     consecutive_failures = 0
-                                    logger.info(
-                                        f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                                    logger.info(f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
                                     continue
 
                         if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
@@ -339,8 +335,7 @@ class SearchParser:
                                 current_search_term = alternative_search_terms[current_search_idx]
                                 page = 1
                                 consecutive_failures = 0
-                                logger.info(
-                                    f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
+                                logger.info(f"Переключаемся на альтернативный поисковый запрос: '{current_search_term}'")
                             else:
                                 logger.error(f"Исчерпаны все альтернативные поисковые запросы. Завершаем сбор ссылок.")
                                 break
@@ -451,13 +446,12 @@ class SearchParser:
                         if self.circuit_breaker["failures"] >= self.circuit_breaker["threshold"]:
                             self.circuit_breaker["is_open"] = True
                             self.circuit_open_time = time.time()
-                            logger.warning("Автоматический выключатель открыт из-за повторяющихся сбоев")
+                            logger.warning("Circuit breaker opened due to repeated failures")
 
                             # Switch search term when circuit breaker opens
                             if current_search_idx < len(alternative_search_terms) - 1:
                                 current_search_idx += 1
                                 current_search_term = alternative_search_terms[current_search_idx]
-                                page = 1
                     else:
                         # Reset failures on success
                         self.circuit_breaker["failures"] = max(0, self.circuit_breaker["failures"] - 1)
@@ -465,12 +459,12 @@ class SearchParser:
                     page += 1
 
                     # Human-like random page skipping
-                    if random.random() < 0.2:  # 20% шанс пропустить страницы
+                    if random.random() < 0.2:  # 20% chance to skip pages
                         skip_pages = random.randint(1, 3)
                         page += skip_pages
-                        logger.info(f"Случайно пропускаем {skip_pages} страниц, чтобы выглядеть более естественно")
+                        logger.info(f"Randomly skipping {skip_pages} pages to appear more human-like")
 
-                    time.sleep(random.uniform(2, 5))  # Случайная задержка между страницами
+                    time.sleep(random.uniform(2, 5))  # Random delay between pages
 
                 finally:
                     driver.quit()
@@ -482,19 +476,19 @@ class SearchParser:
                 logger.error(traceback.format_exc())
                 consecutive_failures += 1
 
-                # Проверяем, похоже ли исключение на CAPTCHA или обнаружение бота
+                # Check if exception looks like a CAPTCHA or bot detection issue
                 if any(term in str(e).lower() for term in ["captcha", "challenge", "robot", "автоматизированными"]):
-                    logger.warning("Обнаружена возможная проблема с защитой от ботов в исключении. Охлаждение...")
-                    time.sleep(random.uniform(60, 120))  # Длительное охлаждение при подозрении на блокировку
+                    logger.warning("Detected possible anti-bot challenge in exception. Cooling down...")
+                    time.sleep(random.uniform(60, 120))  # Longer cooldown for suspected blocking
 
-                    # Пробуем переключиться на другие поисковые запросы при подозрении на блокировку
+                    # Try switching search terms on suspected blocking
                     if current_search_idx < len(alternative_search_terms) - 1:
                         current_search_idx += 1
                         current_search_term = alternative_search_terms[current_search_idx]
                         page = 1
                         consecutive_failures = 0
-                        logger.info(f"Подозрение на блокировку, переключаемся на: '{current_search_term}'")
+                        logger.info(f"Suspected blocking, switching to: '{current_search_term}'")
                 else:
-                    time.sleep(5)  # Обычная пауза после других ошибок
+                    time.sleep(5)  # Regular pause after other errors
 
         return urls[:target_count]

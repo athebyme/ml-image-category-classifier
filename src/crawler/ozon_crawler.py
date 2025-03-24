@@ -1,7 +1,6 @@
 """
-Главный модуль краулера Wildberries.
+Главный модуль краулера Ozon.
 """
-import os
 import time
 import random
 import signal
@@ -15,15 +14,15 @@ from .utils.browser import BrowserManager
 from .utils.proxy_manager import ProxyManager
 from .utils.captcha_resolver import CaptchaSolver
 from .utils.backoff import ExponentialBackoff
-from .parsers.wildberries_product_parser import WildberriesProductParser
-from .parsers.wildberries_search_parser import WildberriesSearchParser
+from .parsers.ozon_product_parser import OzonProductParser
+from .parsers.ozon_search_parser import OzonSearchParser
 from .storage.json_storage import JsonStorage
 from .config import DEFAULT_MAX_WORKERS
 
 
-class WildberriesCrawler:
+class OzonCrawler:
     """
-    Основной класс краулера для сбора данных с сайта Wildberries.
+    Основной класс краулера для сбора данных с сайта Ozon.
 
     Координирует все процессы краулинга: поиск товаров по категориям,
     парсинг страниц товаров, обработку ошибок и сохранение данных.
@@ -31,12 +30,12 @@ class WildberriesCrawler:
 
     def __init__(self, category_targets, max_workers=DEFAULT_MAX_WORKERS, output_dir=None):
         """
-        Инициализирует краулер Wildberries.
+        Инициализирует краулер Ozon.
 
         Args:
             category_targets (dict): Словарь с целевыми категориями и количеством товаров.
             max_workers (int, optional): Максимальное количество рабочих потоков.
-            output_dir (str, optional): Директория для сохранения результатов.
+            output_dir (str, optional): Директория для сохранения данных.
         """
         self.category_targets = category_targets
         self.max_workers = max_workers
@@ -48,9 +47,9 @@ class WildberriesCrawler:
         self.proxy_manager = ProxyManager()
         self.browser_manager = BrowserManager(self.proxy_manager)
         self.captcha_solver = CaptchaSolver()
-        self.product_parser = WildberriesProductParser(self.browser_manager, self.captcha_solver)
+        self.product_parser = OzonProductParser(self.browser_manager, self.captcha_solver)
         self.storage = JsonStorage(output_dir)
-        self.search_parser = WildberriesSearchParser(self.browser_manager, self.captcha_solver)
+        self.search_parser = OzonSearchParser(self.browser_manager, self.captcha_solver)
 
         # Настройка хранилища и очереди
         self.search_parser.set_existing_articles(self.storage.get_existing_articles())
@@ -69,7 +68,7 @@ class WildberriesCrawler:
         signal.signal(signal.SIGINT, self.handle_shutdown)
         signal.signal(signal.SIGTERM, self.handle_shutdown)
 
-        logger.info("Инициализация WildberriesCrawler завершена.")
+        logger.info("Инициализация OzonCrawler завершена.")
 
     def handle_shutdown(self, signum, frame):
         """
@@ -95,7 +94,7 @@ class WildberriesCrawler:
                 "categories_processed": self.processed_categories,
                 "urls_collected": self.urls_collected,
                 "products_processed": self.products_processed,
-                "source": "wildberries"  # Добавляем метку источника
+                "source": "ozon"
             }
 
             self.storage.save_state(status_info)
@@ -128,7 +127,7 @@ class WildberriesCrawler:
             logger.error(f"Ошибка при завершении процессов Chrome: {e}")
 
         # Финальное сообщение
-        logger.info("Завершение работы краулера Wildberries...")
+        logger.info("Завершение работы краулера Ozon...")
 
         # Корректно завершаем работу программы
         import sys
@@ -160,7 +159,7 @@ class WildberriesCrawler:
                 except Empty:
                     break
                 except Exception as e:
-                    logger.error(f"Неожиданная ошибка в воркере: {e}")
+                    logger.error(f"Неожиданная ошибка в воркере Ozon: {e}")
         finally:
             driver.quit()
             logger.debug("Драйвер закрыт.")
@@ -172,27 +171,24 @@ class WildberriesCrawler:
         Returns:
             float: Фактическое время задержки в секундах.
         """
-        # Базовая задержка - начинаем с 5 секунд
-        base_delay = 5
-
         # Увеличиваем задержку с каждой попыткой, но не более 5 минут
         attempt = getattr(self, 'rate_limit_attempts', 0) + 1
         setattr(self, 'rate_limit_attempts', attempt)
 
-        # Формула для экспоненциальной задержки: базовая_задержка * 2^попытка
-        delay = min(base_delay * (2 ** attempt), 300)  # Максимум 300 секунд (5 минут)
+        # Формула для экспоненциальной задержки
+        delay = min(5 * (2 ** attempt), 300)  # Максимум 300 секунд (5 минут)
 
         # Добавляем случайное отклонение ±20% для маскировки автоматизации
         jitter = random.uniform(0.8, 1.2)
         actual_delay = delay * jitter
 
         logger.warning(
-            f"Обнаружено возможное ограничение запросов. Ожидание {actual_delay:.2f} секунд (попытка {attempt})")
+            f"Обнаружено возможное ограничение запросов на Ozon. Ожидание {actual_delay:.2f} секунд (попытка {attempt})")
 
-        # Пауза с обратным отсчетом, чтобы видеть прогресс в логах
+        # Пауза с обратным отсчетом
         for i in range(int(actual_delay), 0, -10):
-            remaining = min(i, 10)  # Выводим каждые 10 секунд или меньше
-            if i <= 30 or i % 30 == 0:  # Сокращаем количество записей в лог
+            remaining = min(i, 10)
+            if i <= 30 or i % 30 == 0:
                 logger.debug(f"Осталось ждать: {i} секунд")
             time.sleep(remaining)
 
@@ -205,11 +201,11 @@ class WildberriesCrawler:
 
     def run(self):
         """
-        Запускает процесс краулинга.
+        Запускает процесс краулинга Ozon.
 
         Собирает URL по категориям, обрабатывает товары и сохраняет данные.
         """
-        logger.info("Запуск краулера Wildberries...")
+        logger.info("Запуск краулера Ozon...")
 
         # Проверяем наличие прокси и при необходимости ищем бесплатные
         if not self.proxy_manager.proxies:
@@ -232,9 +228,9 @@ class WildberriesCrawler:
 
         # Собираем ссылки для всех категорий
         for category, target_count in self.category_targets.items():
-            logger.info(f"Сбор ссылок для категории: {category} (цель: {target_count} товаров)")
+            logger.info(f"Сбор ссылок для категории Ozon: {category} (цель: {target_count} товаров)")
             product_urls = self.search_parser.collect_product_urls(category, target_count)
-            logger.info(f"Для категории {category} собрано {len(product_urls)} ссылок.")
+            logger.info(f"Для категории {category} собрано {len(product_urls)} ссылок на Ozon.")
 
             for url in product_urls:
                 all_tasks.append((url, category))
@@ -243,24 +239,25 @@ class WildberriesCrawler:
             self.processed_categories.append(category)
 
         # Обрабатываем товары партиями для лучшего управления ресурсами
-        logger.info(f"Начало обработки товаров с использованием {actual_workers} рабочих потоков.")
+        logger.info(f"Начало обработки товаров Ozon с использованием {actual_workers} рабочих потоков.")
         batch_size = 100
         for i in range(0, len(all_tasks), batch_size):
             batch = all_tasks[i:i + batch_size]
-            logger.info(f"Обработка пакета {i // batch_size + 1}/{math.ceil(len(all_tasks) / batch_size)}")
+            logger.info(f"Обработка пакета Ozon {i // batch_size + 1}/{math.ceil(len(all_tasks) / batch_size)}")
 
             for url, category in batch:
                 self.products_queue.put((url, category))
 
             with ThreadPoolExecutor(max_workers=actual_workers) as executor:
-                workers = [executor.submit(self.worker) for _ in range(min(actual_workers, self.products_queue.qsize()))]
+                workers = [executor.submit(self.worker) for _ in
+                           range(min(actual_workers, self.products_queue.qsize()))]
                 for worker in as_completed(workers):
                     try:
                         worker.result()
                     except Exception as e:
-                        logger.error(f"Рабочий поток завершился с ошибкой: {e}")
+                        logger.error(f"Рабочий поток Ozon завершился с ошибкой: {e}")
 
-            logger.info(f"Пакет {i // batch_size + 1} завершен")
+            logger.info(f"Пакет Ozon {i // batch_size + 1} завершен")
 
             # Случайная пауза между пакетами для уменьшения нагрузки на сервер
             wait_time = random.uniform(30, 60)
@@ -268,8 +265,8 @@ class WildberriesCrawler:
 
         end_time = time.time()
         elapsed_time = end_time - start_time
-        logger.info(f"Краулинг Wildberries завершён за {elapsed_time:.2f} секунд.")
-        logger.info(f"Всего обработано товаров: {self.products_processed}")
+        logger.info(f"Краулинг Ozon завершён за {elapsed_time:.2f} секунд.")
+        logger.info(f"Всего обработано товаров Ozon: {self.products_processed}")
         logger.info(f"Все товары сохранены в каталоге '{self.storage.output_dir}'.")
 
         # Останавливаем виртуальный дисплей

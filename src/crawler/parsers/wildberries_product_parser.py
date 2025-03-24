@@ -10,10 +10,11 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
+
 from ..logging_setup import logger
 
 
-class ProductParser:
+class WildberriesProductParser:
     """
     Класс для парсинга страниц товаров Wildberries.
 
@@ -179,7 +180,8 @@ class ProductParser:
                 "characteristics": characteristics,
                 "images": images,
                 "product-category-description": category,
-                "url": url
+                "url": url,
+                "source": "wildberries"  # Добавляем источник данных
             }
         except Exception as e:
             logger.error(f"Ошибка обработки карточки товара {url}: {e}")
@@ -396,7 +398,7 @@ class ProductParser:
             # Получаем все видимые слайды
             current_strategy = "standard_gallery"
             slides = driver.find_elements(By.CSS_SELECTOR,
-                                          "li.swiper-slide.j-product-photo:not([style*='display: none'])")
+                                         "li.swiper-slide.j-product-photo:not([style*='display: none'])")
 
             if not slides:
                 slides = driver.find_elements(By.CSS_SELECTOR, "div.sw-slider-product__item")
@@ -533,7 +535,7 @@ class ProductParser:
 
                             # Обрабатываем вновь появившиеся слайды
                             new_slides = driver.find_elements(By.CSS_SELECTOR,
-                                                              "li.swiper-slide.j-product-photo:not([style*='display: none'])")
+                                                             "li.swiper-slide.j-product-photo:not([style*='display: none'])")
 
                             if not new_slides:
                                 new_slides = driver.find_elements(By.CSS_SELECTOR, "div.sw-slider-product__item")
@@ -553,7 +555,7 @@ class ProductParser:
             elif current_strategy == "alternate_gallery" or current_strategy == "fallback":
                 # Находим все элементы изображений
                 img_elements = driver.find_elements(By.CSS_SELECTOR,
-                                                    "img[src*='/catalog/'], img[data-src*='/catalog/'], img[src*='wbstatic']")
+                                                   "img[src*='/catalog/'], img[data-src*='/catalog/'], img[src*='wbstatic']")
 
                 for img in img_elements:
                     img_url = extract_and_convert_image_url(img)

@@ -6,6 +6,6 @@
 - Управления сохраненными товарами
 """
 
-from crawler.storage.json_storage import JsonStorage
+from ..storage.json_storage import JsonStorage
 
 __all__ = ['JsonStorage']

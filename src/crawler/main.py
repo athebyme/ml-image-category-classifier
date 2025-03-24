@@ -1,14 +1,16 @@
 """
-Точка входа для запуска краулера Wildberries.
+Точка входа для запуска краулера.
 
 Пример использования:
-    python -m crawler.main
+    python -m crawler.main --source wildberries
+    python -m crawler.main --source ozon
 """
 import os
 import json
 import time
 import argparse
 from logging_setup import logger
+from src.crawler.ozon_crawler import OzonCrawler
 from wildberries_crawler import WildberriesCrawler
 from storage.json_storage import JsonStorage
 
@@ -149,8 +151,16 @@ def main():
         logger.warning("Нет категорий для сбора (все целевые значения равны 0)")
         return
 
-    # Создаем и запускаем краулер
-    crawler = WildberriesCrawler(adjusted_targets, max_workers=args.max_workers)
+        # Выбираем и создаем краулер в зависимости от указанного источника
+    source = args.source.lower()
+    logger.info(f"Запуск краулера для источника: {source}")
+
+    if source == 'ozon':
+        # Создаем краулер Ozon
+        crawler = OzonCrawler(adjusted_targets, max_workers=args.max_workers, output_dir=args.output_dir)
+    else:
+        # По умолчанию используем Wildberries
+        crawler = WildberriesCrawler(adjusted_targets, max_workers=args.max_workers, output_dir=args.output_dir)
 
     try:
         start_time = time.time()
